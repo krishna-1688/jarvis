@@ -1,0 +1,8 @@
+.widget-shell {
+  width: 100vw;
+  height: 100vh;
+  background: var(--chassis);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}

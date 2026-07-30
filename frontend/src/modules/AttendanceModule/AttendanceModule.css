@@ -1,0 +1,38 @@
+.attendance-module {
+  height: 100%;
+  display: flex;
+  gap: 8px;
+  /* Flex items default to min-height:auto, which can stop them shrinking
+     below their content's intrinsic size even with height:100% set —
+     without this, "overflow-y: auto" below has nothing to scroll inside
+     and the gauges just bleed into whatever module sits below instead. */
+  min-height: 0;
+}
+
+.attendance-module--compact,
+.attendance-module--expanded {
+  overflow-y: auto;
+  /* Reads as a recessed, scrollable well (matches .inset/.display-well
+     elsewhere) once there are enough subjects to overflow the frame. */
+  box-shadow:
+    inset 0 6px 6px -6px var(--inset-shadow),
+    inset 0 -6px 6px -6px var(--inset-shadow);
+}
+
+.attendance-module--compact {
+  flex-direction: column;
+  justify-content: space-around;
+}
+
+.attendance-module--compact .attendance-gauge {
+  flex-shrink: 0;
+}
+
+.attendance-module--expanded {
+  flex-wrap: wrap;
+  align-content: flex-start;
+}
+
+.attendance-module--expanded .attendance-gauge {
+  width: calc(50% - 4px);
+}

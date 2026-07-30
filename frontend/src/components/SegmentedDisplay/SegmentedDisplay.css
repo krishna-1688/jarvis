@@ -1,0 +1,64 @@
+.seg-well {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--display-bg);
+  border-radius: var(--radius-control);
+  box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.5);
+  padding: 0.3em 0.5em;
+  line-height: 1;
+}
+
+.seg-well--sm { font-size: 14px; }
+.seg-well--md { font-size: 24px; }
+.seg-well--lg { font-size: 44px; }
+
+.seg {
+  position: relative;
+  display: inline-grid;
+  letter-spacing: 0.03em;
+  line-height: 1;
+}
+
+.seg--seg7  { font-family: var(--font-seg7); }
+.seg--seg14 { font-family: var(--font-seg14); }
+
+.seg__ghost,
+.seg__value {
+  grid-area: 1 / 1;
+  white-space: pre;
+}
+
+.seg__ghost { color: color-mix(in srgb, var(--display-glow) 14%, transparent); }
+
+.seg--amber .seg__value {
+  color: var(--display-glow);
+  text-shadow: 0 0 6px color-mix(in srgb, var(--display-glow) 50%, transparent);
+}
+
+.seg--signal .seg__value {
+  color: var(--signal);
+  text-shadow: 0 0 6px color-mix(in srgb, var(--signal) 50%, transparent);
+}
+
+.seg--signal .seg__ghost { color: color-mix(in srgb, var(--signal) 14%, transparent); }
+
+.seg--safe .seg__value {
+  color: var(--safe);
+  text-shadow: 0 0 6px color-mix(in srgb, var(--safe) 40%, transparent);
+}
+
+.seg--safe .seg__ghost { color: color-mix(in srgb, var(--safe) 14%, transparent); }
+
+.seg__suffix {
+  font-family: var(--font-ui);
+  font-size: 0.5em;
+  margin-left: 0.15em;
+  align-self: flex-end;
+  padding-bottom: 0.2em;
+  opacity: 0.85;
+}
+
+.seg__suffix--amber  { color: var(--display-glow); }
+.seg__suffix--signal { color: var(--signal); }
+.seg__suffix--safe   { color: var(--safe); }

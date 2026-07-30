@@ -1,0 +1,98 @@
+.rack {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.rack__grid-wrap {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--grid);
+  border-radius: var(--radius-panel);
+  transition: background-color var(--dur-med) var(--ease-standard);
+}
+
+.rack--editing .rack__grid-wrap {
+  background-image: radial-gradient(color-mix(in srgb, var(--ink) 6%, transparent) 1px, transparent 1px);
+  background-size: 16px 16px;
+  background-position: -4px -4px;
+}
+
+.rack__grid { position: relative; }
+
+/* react-grid-layout ships inline-style positioning; everything visual below
+   is ours — no react-grid-layout/css/styles.css import anywhere. */
+.react-grid-item {
+  transition: transform var(--spring-settle) var(--ease-standard),
+              width var(--spring-settle) var(--ease-standard),
+              height var(--spring-settle) var(--ease-standard);
+}
+
+.react-grid-item.react-draggable-dragging {
+  transition: none;
+  z-index: 30;
+}
+
+.react-grid-item.resizing {
+  transition: none;
+  z-index: 30;
+}
+
+.react-grid-placeholder {
+  background: var(--inset) !important;
+  border: 1px dashed color-mix(in srgb, var(--ink) 20%, transparent) !important;
+  border-radius: var(--radius-panel);
+  opacity: 1 !important;
+}
+
+.react-resizable-handle {
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  right: 0;
+  bottom: 0;
+  cursor: se-resize;
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease-standard);
+}
+
+.rack--editing .react-resizable-handle { opacity: 0.6; }
+
+.react-resizable-handle::after {
+  content: '';
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  width: 7px;
+  height: 7px;
+  border-right: 2px solid var(--ink-dim);
+  border-bottom: 2px solid var(--ink-dim);
+  border-radius: 1px;
+}
+
+/* V.2a boot sequence — modules fade/settle in staggered by DOM order
+   (which follows the default layout's reading order: top-left first).
+   Scoped to document.body's data-booting window only, so rearranging
+   modules afterward never replays this. */
+[data-booting] .rack-module {
+  animation: module-boot-in 380ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+[data-booting] .rack__grid > .react-grid-item:nth-of-type(1) .rack-module { animation-delay: 350ms; }
+[data-booting] .rack__grid > .react-grid-item:nth-of-type(2) .rack-module { animation-delay: 390ms; }
+[data-booting] .rack__grid > .react-grid-item:nth-of-type(3) .rack-module { animation-delay: 430ms; }
+[data-booting] .rack__grid > .react-grid-item:nth-of-type(4) .rack-module { animation-delay: 470ms; }
+[data-booting] .rack__grid > .react-grid-item:nth-of-type(5) .rack-module { animation-delay: 510ms; }
+[data-booting] .rack__grid > .react-grid-item:nth-of-type(6) .rack-module { animation-delay: 550ms; }
+[data-booting] .rack__grid > .react-grid-item:nth-of-type(n+7) .rack-module { animation-delay: 590ms; }
+
+@keyframes module-boot-in {
+  from { opacity: 0; transform: translateY(10px) scale(0.98); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-booting] .rack-module { animation: none; opacity: 1; transform: none; }
+}

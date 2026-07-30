@@ -1,0 +1,78 @@
+import re
+from typing import Any, Dict, Union
+from annotated_types import T
+import pandas as pd
+import datetime
+
+
+def find_image(html_str: str) -> Union[str, None]:
+    """
+    finds the captcha base64 image in the given html
+
+    Explanation:
+    ------------
+
+    pattern is like this:
+        > src="data:.*;base64,(.*?)"
+        ----------------------------
+        - src="data: # matches this particular string 
+        - .* # matches any character any number of times
+        - ;base64, # matches this particular string
+        - (.*?) # matches any character any number of times and stores it in a group
+
+    then we are using the group 1 to get the base64 image
+    """
+    img_pattern = re.compile(r'src="data:.*;base64,(.*?)"')
+    img = re.search(img_pattern, html_str)
+    if img:
+        return img.group(1)
+    return None
+
+
+def null_if_dash(x): return None if x == "-" else x
+
+
+def get_curr_time_vtop_format() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%c GMT")
+
+
+def is_int(s: str) -> bool:
+    try:
+        int(s)
+        return True
+    except Exception:
+        return False
+
+
+def nan_to_none_in_dict(x: Dict) -> Dict:
+    """
+    converts all the nan values to None in the given dict
+    """
+    return {k: None if pd.isna(v) else v for k, v in x.items()}
+
+def may_throw(func):
+    async def wrapper(*args, **kwargs):
+        try:
+            return await func(*args, **kwargs)
+        except Exception as e:
+            print(
+                f"Error in {func.__name__} with args: {args} and kwargs: {kwargs}")
+            print(f"Error: {e}")
+    return wrapper
+
+
+def get_item(arr: list[T], idx: int) -> Union[T, None]:
+    """
+    returns the first element of the given array
+    """
+    return arr[idx] if len(arr) > idx else None
+
+def get_from_df(df: Union[pd.DataFrame, None], row: int, col: int) -> Union[Any, None]:
+    """
+    returns the value at the given row and col in the given dataframe
+    """
+    if df is None: return None
+    try:
+        return df.iloc[row, col]
+    except IndexError:
+        return None

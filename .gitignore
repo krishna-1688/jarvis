@@ -1,0 +1,17 @@
+node_modules/
+__pycache__/
+*.pyc
+.env
+data/*.db
+data/.spotify_cache
+dist/
+build/
+.venv/
+venv/
+*.log
+whatsapp_service/.wwebjs_auth/
+whatsapp_service/.wwebjs_cache/
+frontend/node_modules/
+frontend/electron/node_modules/
+whatsapp_service/node_modules/
+**/node_modules/

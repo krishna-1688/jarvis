@@ -1,0 +1,30 @@
+.exam-countdown {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.exam-countdown__row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.exam-countdown__sep {
+  color: var(--ink-dim);
+  font-size: 14px;
+}
+
+.exam-countdown__label {
+  font-size: 10px;
+  color: var(--ink-dim);
+  letter-spacing: 0.03em;
+  text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}

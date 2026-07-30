@@ -1,0 +1,77 @@
+/* Design tokens — "The Instrument". Two chassis themes: daylight (default/light)
+   and midnight (dark). Signal/safe/display colors are shared across themes. */
+
+:root {
+  color-scheme: light dark;
+
+  /* daylight chassis (light) — base values, overridden below for dark */
+  --chassis:      #E8E6E1;
+  --panel:        #F4F3F0;
+  --inset:        #DAD7D0;
+  --ink:          #1A1918;
+  --ink-dim:      #6E6B66;
+  --panel-border:         rgba(26, 25, 24, 0.08);
+  --panel-edge-highlight: rgba(255, 255, 255, 0.4);
+  --inset-shadow:         rgba(26, 25, 24, 0.10);
+
+  /* shared across both themes */
+  --signal:       #FF4D00;
+  --safe:         #3D8B40;
+  --error:        #E5484D;
+  --display-bg:   #232220;
+  --display-glow: #FFB000;
+
+  --radius-panel:   6px;
+  --radius-control: 3px;
+  --grid: 8px;
+
+  --ease-standard: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --dur-fast: 150ms;
+  --dur-med:  200ms;
+  --dur-slow: 250ms;
+  --spring-settle: 180ms;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --chassis: #2A2926;
+    --panel:   #1F1E1C;
+    --inset:   #171614;
+    --ink:     #E8E6E1;
+    --ink-dim: #8A8781;
+    --panel-border:         rgba(232, 230, 225, 0.08);
+    --panel-edge-highlight: rgba(255, 255, 255, 0.06);
+    --inset-shadow:         rgba(0, 0, 0, 0.35);
+  }
+}
+
+:root[data-theme="dark"] {
+  --chassis: #2A2926;
+  --panel:   #1F1E1C;
+  --inset:   #171614;
+  --ink:     #E8E6E1;
+  --ink-dim: #8A8781;
+  --panel-border:         rgba(232, 230, 225, 0.08);
+  --panel-edge-highlight: rgba(255, 255, 255, 0.06);
+  --inset-shadow:         rgba(0, 0, 0, 0.35);
+}
+
+:root[data-theme="light"] {
+  --chassis: #E8E6E1;
+  --panel:   #F4F3F0;
+  --inset:   #DAD7D0;
+  --ink:     #1A1918;
+  --ink-dim: #6E6B66;
+  --panel-border:         rgba(26, 25, 24, 0.08);
+  --panel-edge-highlight: rgba(255, 255, 255, 0.4);
+  --inset-shadow:         rgba(26, 25, 24, 0.10);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-fast: 1ms;
+    --dur-med:  1ms;
+    --dur-slow: 1ms;
+    --spring-settle: 1ms;
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "food": ["zomato", "swiggy", "lunch", "dinner", "breakfast", "cafe", "coffee", "restaurant", "canteen", "mess", "snack", "food court", "biryani", "kfc", "mcdonald", "dominos", "pizza hut", "burger king", "subway", "starbucks", "chai point", "dunkin"],
+  "travel": ["ola", "uber", "rapido", "auto", "petrol", "irctc", "train", "bus", "cab", "metro", "fuel"],
+  "subscriptions": ["netflix", "spotify", "youtube premium", "chatgpt", "claude", "prime video", "hotstar", "amazon prime", "subscription"],
+  "academics": ["books", "textbook", "stationery", "printout", "xerox", "photocopy", "course fee", "exam fee", "lab fee"],
+  "entertainment": ["movie", "cinema", "pvr", "inox", "game", "steam", "concert", "outing"]
+}

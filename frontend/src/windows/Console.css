@@ -1,0 +1,25 @@
+.console {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  width: 100vw;
+  background: var(--chassis);
+  position: relative;
+}
+
+.console__rack-wrap {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  /* Slight lag added on top of the raw transform via a spring-ish ease —
+     the smoothing itself already happens in useChassisParallax's lerp,
+     this just keeps abrupt window-resize/layout jumps from snapping. */
+  transition: transform 60ms linear;
+}
+
+.console__rack-wrap > .rack { flex: 1; min-height: 0; }
+
+@media (prefers-reduced-motion: reduce) {
+  .console__rack-wrap { transform: none !important; }
+}
