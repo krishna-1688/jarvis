@@ -2,8 +2,11 @@ node_modules/
 __pycache__/
 *.pyc
 .env
-data/*.db
-data/.spotify_cache
+**/data/*.db
+**/data/.spotify_cache
+**/data/memory/
+*.db
+*.sqlite3
 dist/
 build/
 .venv/
