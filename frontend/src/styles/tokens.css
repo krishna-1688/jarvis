@@ -1,28 +1,32 @@
-/* Design tokens — "The Instrument". Two chassis themes: daylight (default/light)
-   and midnight (dark). Signal/safe/display colors are shared across themes. */
+/* Design tokens — "Sovereign". A deep midnight chassis with a warm copper
+   signal color, replacing the earlier cream/amber "Instrument" palette.
+   Two chassis modes: Midnight (dark/default) and Dawn (light) — same
+   copper identity in both, never the old warm cream. */
 
 :root {
   color-scheme: light dark;
 
-  /* daylight chassis (light) — base values, overridden below for dark */
-  --chassis:      #E8E6E1;
-  --panel:        #F4F3F0;
-  --inset:        #DAD7D0;
-  --ink:          #1A1918;
-  --ink-dim:      #6E6B66;
-  --panel-border:         rgba(26, 25, 24, 0.08);
-  --panel-edge-highlight: rgba(255, 255, 255, 0.4);
-  --inset-shadow:         rgba(26, 25, 24, 0.10);
+  /* Sovereign Midnight (dark) — base values, overridden below for Dawn */
+  --chassis:      #090C13;
+  --panel:        #0F1420;
+  --inset:        #060810;
+  --ink:          #E9EDF6;
+  --ink-dim:      #7A84A0;
+  --panel-border:         rgba(138, 156, 199, 0.10);
+  --panel-edge-highlight: rgba(168, 188, 255, 0.05);
+  --inset-shadow:         rgba(0, 0, 0, 0.45);
 
   /* shared across both themes */
-  --signal:       #FF4D00;
-  --safe:         #3D8B40;
-  --error:        #E5484D;
-  --display-bg:   #232220;
-  --display-glow: #FFB000;
+  --signal:       #C9834A;
+  --signal-2:     #E0A85C;
+  --on-signal:    #0A0E17;
+  --safe:         #45BF8C;
+  --error:        #F0555A;
+  --display-bg:   #05060B;
+  --display-glow: #E8AC5C;
 
-  --radius-panel:   6px;
-  --radius-control: 3px;
+  --radius-panel:   10px;
+  --radius-control: 5px;
   --grid: 8px;
 
   --ease-standard: cubic-bezier(0.2, 0.8, 0.2, 1);
@@ -34,37 +38,38 @@
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --chassis: #2A2926;
-    --panel:   #1F1E1C;
-    --inset:   #171614;
-    --ink:     #E8E6E1;
-    --ink-dim: #8A8781;
-    --panel-border:         rgba(232, 230, 225, 0.08);
-    --panel-edge-highlight: rgba(255, 255, 255, 0.06);
-    --inset-shadow:         rgba(0, 0, 0, 0.35);
+    --chassis: #090C13;
+    --panel:   #0F1420;
+    --inset:   #060810;
+    --ink:     #E9EDF6;
+    --ink-dim: #7A84A0;
+    --panel-border:         rgba(138, 156, 199, 0.10);
+    --panel-edge-highlight: rgba(168, 188, 255, 0.05);
+    --inset-shadow:         rgba(0, 0, 0, 0.45);
   }
 }
 
 :root[data-theme="dark"] {
-  --chassis: #2A2926;
-  --panel:   #1F1E1C;
-  --inset:   #171614;
-  --ink:     #E8E6E1;
-  --ink-dim: #8A8781;
-  --panel-border:         rgba(232, 230, 225, 0.08);
-  --panel-edge-highlight: rgba(255, 255, 255, 0.06);
-  --inset-shadow:         rgba(0, 0, 0, 0.35);
+  --chassis: #090C13;
+  --panel:   #0F1420;
+  --inset:   #060810;
+  --ink:     #E9EDF6;
+  --ink-dim: #7A84A0;
+  --panel-border:         rgba(138, 156, 199, 0.10);
+  --panel-edge-highlight: rgba(168, 188, 255, 0.05);
+  --inset-shadow:         rgba(0, 0, 0, 0.45);
 }
 
+/* Sovereign Dawn — cool porcelain/slate, never warm cream. */
 :root[data-theme="light"] {
-  --chassis: #E8E6E1;
-  --panel:   #F4F3F0;
-  --inset:   #DAD7D0;
-  --ink:     #1A1918;
-  --ink-dim: #6E6B66;
-  --panel-border:         rgba(26, 25, 24, 0.08);
-  --panel-edge-highlight: rgba(255, 255, 255, 0.4);
-  --inset-shadow:         rgba(26, 25, 24, 0.10);
+  --chassis: #E9ECF3;
+  --panel:   #F6F7FB;
+  --inset:   #DDE1EC;
+  --ink:     #131722;
+  --ink-dim: #616B85;
+  --panel-border:         rgba(19, 23, 34, 0.08);
+  --panel-edge-highlight: rgba(255, 255, 255, 0.65);
+  --inset-shadow:         rgba(19, 23, 34, 0.09);
 }
 
 @media (prefers-reduced-motion: reduce) {

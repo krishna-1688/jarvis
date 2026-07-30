@@ -4,8 +4,9 @@ import Teleprinter from '../../components/Teleprinter/Teleprinter.jsx';
 import { api } from '../../api.js';
 import { USE_MOCK } from '../../mock.js';
 import { playSuccessBlip } from '../../lib/sound.js';
-import { speakReply } from '../../lib/tts.js';
+import { speakReply, stopSpeaking } from '../../lib/tts.js';
 import { useWebSocket } from '../../hooks/useWebSocket.js';
+import { setLocalVoiceState } from '../../hooks/useVoiceState.js';
 import './VUCoreModule.css';
 
 function mockReply(text) {
@@ -37,6 +38,15 @@ export default function VUCoreModule() {
   const [inputFocused, setInputFocused] = useState(false);
   const [placeholderIndex, setPlaceholderIndex] = useState(0);
   const logRef = useRef(null);
+
+  // Typed-command state also mirrors into the shared voice-state store
+  // (useVoiceState.js) so ambient effects elsewhere in the chassis —
+  // VoicePresence, ChassisLighting — react to a typed exchange exactly
+  // like a spoken one, not just to real mic/TTS events.
+  const updateVoiceState = (next) => {
+    setVoiceState(next);
+    setLocalVoiceState(next);
+  };
 
   useEffect(() => {
     const el = logRef.current;
@@ -106,17 +116,23 @@ export default function VUCoreModule() {
     e.preventDefault();
     const text = input.trim();
     if (!text) return;
+    stopSpeaking(); // barge-in: a new command always cuts off whatever Jarvis was mid-saying
     setInput('');
     setLog((prev) => [...prev, { role: 'user', text }]);
-    setVoiceState('speaking');
+    // 'thinking', not 'speaking' — nothing's been said yet, we're waiting
+    // on the backend. Flipping to 'speaking' only once a reply actually
+    // exists keeps the ambient presence effects honest about what's
+    // happening, and gives the wait itself a distinct, calmer visual.
+    updateVoiceState('thinking');
 
     if (USE_MOCK) {
       const reply = mockReply(text);
       setTranscript(reply);
+      updateVoiceState('speaking');
       speakReply(reply);
       window.setTimeout(() => {
         setLog((prev) => [...prev, { role: 'jarvis', text: reply }]);
-        setVoiceState('idle');
+        updateVoiceState('idle');
         setTranscript('');
         playSuccessBlip();
       }, Math.min(900, 150 + reply.length * 8));
@@ -147,24 +163,25 @@ export default function VUCoreModule() {
       const reply = result.display;
       const structured = result.ok && result.data && Object.keys(result.data).length > 0;
       setTranscript(reply);
+      updateVoiceState(result.ok ? 'speaking' : 'error');
       speakReply(result.spoken || reply);
       window.setTimeout(() => {
         setLog((prev) => [...prev, {
           role: 'jarvis', text: reply,
           flagged: !result.ok, structured: !!structured,
         }]);
-        setVoiceState(result.ok ? 'idle' : 'error');
+        updateVoiceState(result.ok ? 'idle' : 'error');
         setTranscript('');
         if (result.ok) playSuccessBlip();
-        if (!result.ok) window.setTimeout(() => setVoiceState('idle'), 400);
+        if (!result.ok) window.setTimeout(() => updateVoiceState('idle'), 400);
       }, Math.min(900, 150 + reply.length * 8));
     } catch {
       const reply = 'Backend unreachable — retrying stays automatic elsewhere on the console.';
       setLog((prev) => [...prev, { role: 'system', text: reply }]);
       speakReply(reply);
-      setVoiceState('error');
+      updateVoiceState('error');
       setTranscript('');
-      window.setTimeout(() => setVoiceState('idle'), 400);
+      window.setTimeout(() => updateVoiceState('idle'), 400);
     }
   };
 
@@ -196,7 +213,13 @@ export default function VUCoreModule() {
         <input
           className="vu-core__input mono"
           value={input}
-          onChange={(e) => setInput(e.target.value)}
+          onChange={(e) => {
+            // Barge-in: the moment the user starts typing over Jarvis
+            // talking, cut the audio rather than let it drone on under
+            // them — matches how you'd naturally interrupt someone.
+            if (voiceState === 'speaking') stopSpeaking();
+            setInput(e.target.value);
+          }}
           onFocus={() => setInputFocused(true)}
           onBlur={() => setInputFocused(false)}
           placeholder={PLACEHOLDER_EXAMPLES[placeholderIndex]}

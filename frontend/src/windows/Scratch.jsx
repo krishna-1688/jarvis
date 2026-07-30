@@ -37,7 +37,7 @@ export default function Scratch() {
                 padding: '6px 12px',
                 borderRadius: 'var(--radius-control)',
                 background: s === state ? 'var(--signal)' : 'var(--inset)',
-                color: s === state ? '#fff' : 'var(--ink)',
+                color: s === state ? 'var(--on-signal)' : 'var(--ink)',
                 fontSize: 11,
                 textTransform: 'uppercase',
                 letterSpacing: '0.05em',

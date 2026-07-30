@@ -26,3 +26,10 @@ export function speakReply(text) {
   utter.pitch = 1;
   window.speechSynthesis.speak(utter);
 }
+
+/** Barge-in support: lets the user cut Jarvis off mid-sentence by typing
+ * (or submitting) a new command, rather than waiting out the utterance. */
+export function stopSpeaking() {
+  if (typeof window === 'undefined' || !window.speechSynthesis) return;
+  window.speechSynthesis.cancel();
+}

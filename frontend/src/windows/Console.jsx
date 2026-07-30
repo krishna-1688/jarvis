@@ -4,6 +4,7 @@ import Rack from '../rack/Rack.jsx';
 import BootSequence from '../components/BootSequence/BootSequence.jsx';
 import ChromeSpine from '../components/ChromeSpine/ChromeSpine.jsx';
 import ChassisLighting from '../components/ChassisLighting/ChassisLighting.jsx';
+import VoicePresence from '../components/VoicePresence/VoicePresence.jsx';
 import StatusBanner from '../components/StatusBanner/StatusBanner.jsx';
 import { MODULE_REGISTRY, DEFAULT_CONSOLE_LAYOUT } from '../rack/moduleRegistry.js';
 import { useTheme } from '../hooks/useTheme.js';
@@ -84,6 +85,7 @@ export default function Console() {
     <div className="console">
       <BootSequence />
       <ChassisLighting />
+      <VoicePresence />
       <StatusBanner
         visible={showBackendBanner}
         text="BACKEND OFFLINE — run: python backend/run.py"

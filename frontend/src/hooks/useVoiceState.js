@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useWebSocket } from './useWebSocket.js';
 
 const START_EVENTS = {
@@ -14,25 +14,46 @@ const END_EVENTS = {
   speaking_end: 'speaking',
 };
 
+// Typed-command override: VUCoreModule pushes its own local voiceState
+// here (via setLocalVoiceState) so ambient effects — VoicePresence,
+// ChassisLighting — react the same way to a typed exchange as a spoken
+// one, instead of only ever lighting up for real mic/TTS events. A
+// module-level pub/sub (mirrors useWebSocket's shared-store pattern)
+// rather than prop-drilling, since these effects mount far from
+// VUCoreModule in the tree.
+let localState = null;
+const localListeners = new Set();
+
+export function setLocalVoiceState(next) {
+  localState = next === 'idle' ? null : next;
+  localListeners.forEach((fn) => fn(localState));
+}
+
 /**
  * Reactive global voice state ('idle'|'wake'|'listening'|'thinking'|
- * 'speaking'), derived from the same real voice events VUCoreModule's
- * meter consumes (see core/voice_bridge.py on the backend). Kept as its
- * own independent WS subscriber (rather than prop-drilled from
- * VUCoreModule) so ambient effects elsewhere in the chassis — like
- * ChassisLighting — can react to "what's Jarvis doing" without coupling
- * to the conversation-log module.
+ * 'speaking'|'error'), merging real voice events (bridged from jarvis.py
+ * via server.py's /internal/voice_event -> WS broadcast) with local
+ * typed-command activity. A local override always wins while active —
+ * it clears itself back to null (falling through to the WS state) the
+ * moment VUCoreModule reports 'idle'.
  */
 export function useVoiceState() {
-  const [state, setState] = useState('idle');
+  const [wsState, setWsState] = useState('idle');
+  const [local, setLocal] = useState(localState);
 
   useWebSocket((msg) => {
     if (START_EVENTS[msg.type]) {
-      setState(START_EVENTS[msg.type]);
+      setWsState(START_EVENTS[msg.type]);
     } else if (END_EVENTS[msg.type]) {
-      setState((s) => (s === END_EVENTS[msg.type] ? 'idle' : s));
+      setWsState((s) => (s === END_EVENTS[msg.type] ? 'idle' : s));
     }
   });
 
-  return state;
+  useEffect(() => {
+    const fn = (v) => setLocal(v);
+    localListeners.add(fn);
+    return () => localListeners.delete(fn);
+  }, []);
+
+  return local ?? wsState;
 }

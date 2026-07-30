@@ -163,5 +163,5 @@
 
 .top-rail__btn--close:hover {
   background: var(--signal);
-  color: #F4F3F0;
+  color: var(--on-signal);
 }

@@ -1,0 +1,129 @@
+/* S.3 — Sovereign's voice-presence overlay. Where ChassisLighting is a
+   faint whole-chassis tint, this is Jarvis's actual "presence": a glow
+   that lives at the top edge, behind the rail, and answers each voice
+   state with its own color and rhythm. Fixed + pointer-events:none, so
+   it never intercepts a click no matter how bright it gets. */
+
+.voice-presence {
+  position: fixed;
+  inset: 0;
+  z-index: 997;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.voice-presence__aura {
+  position: absolute;
+  top: -60%;
+  left: 50%;
+  width: 130%;
+  height: 70%;
+  transform: translateX(-50%) scale(0.85);
+  border-radius: 50%;
+  background: radial-gradient(
+    ellipse at center,
+    color-mix(in srgb, var(--glow-color, var(--display-glow)) 22%, transparent) 0%,
+    color-mix(in srgb, var(--glow-color, var(--display-glow)) 8%, transparent) 40%,
+    transparent 70%
+  );
+  opacity: 0;
+  filter: blur(6px);
+  transition: opacity 420ms var(--ease-standard), transform 420ms var(--ease-standard);
+}
+
+.voice-presence__edge {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, var(--glow-color, var(--display-glow)) 70%, transparent),
+    transparent
+  );
+  opacity: 0;
+  transition: opacity 420ms var(--ease-standard);
+}
+
+/* wake — a quick bright pulse announcing Jarvis heard the wake word */
+.voice-presence.is-wake { --glow-color: var(--display-glow); }
+.voice-presence.is-wake .voice-presence__aura {
+  opacity: 1;
+  transform: translateX(-50%) scale(1.05);
+  animation: presence-wake-pulse 500ms var(--ease-standard) both;
+}
+.voice-presence.is-wake .voice-presence__edge { opacity: 1; }
+
+@keyframes presence-wake-pulse {
+  0%   { opacity: 0; transform: translateX(-50%) scale(0.7); }
+  40%  { opacity: 1; transform: translateX(-50%) scale(1.1); }
+  100% { opacity: 0.55; transform: translateX(-50%) scale(1); }
+}
+
+/* listening — steady attentive glow, slow breathing */
+.voice-presence.is-listening { --glow-color: var(--display-glow); }
+.voice-presence.is-listening .voice-presence__aura {
+  opacity: 0.6;
+  animation: presence-breathe 2.4s ease-in-out infinite;
+}
+.voice-presence.is-listening .voice-presence__edge { opacity: 0.7; }
+
+/* thinking — cooler, a slow sweep left-to-right reading as "working on it" */
+.voice-presence.is-thinking { --glow-color: var(--ink-dim); }
+.voice-presence.is-thinking .voice-presence__aura {
+  opacity: 0.4;
+  animation: presence-breathe 1.6s ease-in-out infinite;
+}
+.voice-presence.is-thinking .voice-presence__edge {
+  opacity: 0.8;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, var(--signal) 65%, transparent),
+    transparent
+  );
+  background-size: 40% 100%;
+  animation: presence-sweep 1.8s linear infinite;
+}
+
+/* speaking — the warmest, most confident state, brisker pulse */
+.voice-presence.is-speaking { --glow-color: var(--signal); }
+.voice-presence.is-speaking .voice-presence__aura {
+  opacity: 0.65;
+  animation: presence-breathe 900ms ease-in-out infinite;
+}
+.voice-presence.is-speaking .voice-presence__edge { opacity: 0.85; }
+
+/* error — a sharp single flash, then gone */
+.voice-presence.is-error { --glow-color: var(--error); }
+.voice-presence.is-error .voice-presence__aura {
+  opacity: 1;
+  animation: presence-error-flash 480ms ease-out both;
+}
+.voice-presence.is-error .voice-presence__edge { opacity: 1; }
+
+@keyframes presence-breathe {
+  0%, 100% { transform: translateX(-50%) scale(0.85); }
+  50%      { transform: translateX(-50%) scale(1.02); }
+}
+
+@keyframes presence-sweep {
+  0%   { background-position: -40% 0; }
+  100% { background-position: 140% 0; }
+}
+
+@keyframes presence-error-flash {
+  0%   { opacity: 0; transform: translateX(-50%) scale(0.9); }
+  30%  { opacity: 1; transform: translateX(-50%) scale(1.08); }
+  100% { opacity: 0; transform: translateX(-50%) scale(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .voice-presence__aura,
+  .voice-presence__edge { animation: none !important; transition: opacity 200ms ease; }
+  .voice-presence.is-listening .voice-presence__aura,
+  .voice-presence.is-thinking .voice-presence__aura,
+  .voice-presence.is-speaking .voice-presence__aura { opacity: 0.35; transform: translateX(-50%) scale(0.9); }
+}

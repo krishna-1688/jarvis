@@ -28,6 +28,16 @@
   word-break: break-word;
   padding-left: 6px;
   border-left: 2px solid transparent;
+  animation: log-line-in 220ms var(--ease-standard) both;
+}
+
+@keyframes log-line-in {
+  from { opacity: 0; transform: translateY(3px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .vu-core__log-line { animation: none; }
 }
 
 .vu-core__log-line--user {
@@ -60,7 +70,16 @@
   background: var(--inset);
   border-radius: var(--radius-control);
   padding: 6px 10px;
+  border: 1px solid transparent;
   box-shadow: inset 0 1px 2px var(--inset-shadow);
+  transition: border-color var(--dur-fast) var(--ease-standard),
+              box-shadow var(--dur-fast) var(--ease-standard);
+}
+
+.vu-core__command:focus-within {
+  border-color: color-mix(in srgb, var(--signal) 45%, transparent);
+  box-shadow: inset 0 1px 2px var(--inset-shadow),
+              0 0 0 3px color-mix(in srgb, var(--signal) 12%, transparent);
 }
 
 .vu-core__prompt {
