@@ -263,6 +263,11 @@ def main():
         # every voice turn is bridged into it too (core/voice_bridge.py)
         # — so the frontend is now the single place to see or type a
         # conversation; this terminal is just the mic.
+        # Pushed as a 'reply' (not just spoken locally) so this greeting
+        # shows up in the Electron console's log too — previously the
+        # only place "Jarvis online" appeared was this terminal, which
+        # isn't where the user is meant to be watching.
+        push_voice_event({"type": "reply", "text": "Jarvis online. Ready when you are, KK."})
         speak("Jarvis online. Ready when you are, KK.")
         start_wakeword_listener(wakeword_conversation)
         threading.Thread(target=_heartbeat_worker, daemon=True).start()

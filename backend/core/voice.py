@@ -23,10 +23,25 @@ import pygame
 import speech_recognition as sr
 from config import GROQ_API_KEY
 from core.voice_bridge import push_voice_event
+from core.audio_device import get_input_device_index
 
 # ── pygame init ───────────────────────────
+# Like the mic (core/audio_device.py), Windows machines often expose
+# more than one playback endpoint (e.g. "Headphones (Realtek Audio)"
+# and "Speakers (Realtek Audio)") — SDL binds to whichever the OS
+# reports as default at this exact moment, with no error if that's not
+# where the user is actually listening. Unlike the mic there's no way
+# to auto-probe "which speaker is audible" from code, so this is
+# manually pinnable via JARVIS_SPEAKER_DEVICE (exact name from
+# `python -c "from pygame._sdl2 import audio; print(audio.get_audio_device_names(False))"`)
+# once you know which one is correct.
 pygame.mixer.pre_init(frequency=22050, size=-16, channels=1, buffer=512)
-pygame.mixer.init()
+_speaker_override = os.environ.get("JARVIS_SPEAKER_DEVICE")
+if _speaker_override:
+    pygame.mixer.init(devicename=_speaker_override)
+    print(f"🔊 Speaker device pinned via JARVIS_SPEAKER_DEVICE={_speaker_override!r}")
+else:
+    pygame.mixer.init()
 
 # ── Voice settings ────────────────────────
 JARVIS_VOICE  = "en-GB-RyanNeural"
@@ -121,7 +136,7 @@ def init_microphone():
     global _mic, _ambient_done
     print("🎤 Calibrating microphone... ", end="", flush=True)
     try:
-        _mic = sr.Microphone(sample_rate=16000)
+        _mic = sr.Microphone(sample_rate=16000, device_index=get_input_device_index())
         with _mic as source:
             _recognizer.adjust_for_ambient_noise(source, duration=1.0)
         _ambient_done = True
@@ -517,6 +532,7 @@ def listen() -> str:
             return ""
 
         _status("⚙️  Transcribing...")
+        push_voice_event({"type": "transcribing_start"})
 
         import groq
         client = groq.Groq(api_key=GROQ_API_KEY)

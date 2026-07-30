@@ -19,6 +19,7 @@ import threading
 import time
 
 from core.voice_bridge import push_voice_event
+from core.audio_device import get_input_device_index
 
 openwakeword.utils.download_models()
 
@@ -83,6 +84,7 @@ def start_stream():
                 channels=CHANNELS,
                 rate=RATE,
                 input=True,
+                input_device_index=get_input_device_index(),
                 frames_per_buffer=CHUNK
             )
         except Exception as e:

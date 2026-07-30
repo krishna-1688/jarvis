@@ -24,6 +24,29 @@ const PLACEHOLDER_EXAMPLES = [
 ];
 const PLACEHOLDER_ROTATE_MS = 4000;
 
+// Human-readable status for whatever Jarvis is doing right now — the
+// ambient glow (VoicePresence/ChassisLighting) is atmospheric, not
+// literally readable, so this is the one place that says it in words.
+const STATE_LABEL = {
+  idle: "Standby — say 'Hey Jarvis'",
+  wake: 'Yes, boss?',
+  listening: 'Listening…',
+  transcribing: 'Transcribing…',
+  thinking: 'Thinking…',
+  speaking: 'Speaking…',
+  error: 'Something went wrong',
+};
+
+const STATE_CHIP_TONE = {
+  idle: 'pending',
+  wake: 'warn',
+  listening: 'warn',
+  transcribing: 'warn',
+  thinking: 'pending',
+  speaking: 'ok',
+  error: 'error',
+};
+
 /**
  * The non-removable 6×6 core (Section 1.5/1.8): meter + teleprinter above a
  * terminal-style conversation log, with the command line pinned to the
@@ -37,7 +60,9 @@ export default function VUCoreModule() {
   const [input, setInput] = useState('');
   const [inputFocused, setInputFocused] = useState(false);
   const [placeholderIndex, setPlaceholderIndex] = useState(0);
+  const [voiceTyping, setVoiceTyping] = useState(false);
   const logRef = useRef(null);
+  const voiceTypingTimer = useRef(null);
 
   // Typed-command state also mirrors into the shared voice-state store
   // (useVoiceState.js) so ambient effects elsewhere in the chassis —
@@ -52,6 +77,10 @@ export default function VUCoreModule() {
     const el = logRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [log]);
+
+  useEffect(() => () => {
+    if (voiceTypingTimer.current) window.clearInterval(voiceTypingTimer.current);
+  }, []);
 
   useEffect(() => {
     if (inputFocused) return undefined;
@@ -73,6 +102,32 @@ export default function VUCoreModule() {
     return () => window.clearTimeout(t);
   }, []);
 
+  // Animates a real spoken transcript into the command bar itself,
+  // character by character, before it lands in the log — the same
+  // visual language typing already has, so a voice turn reads as "Jarvis
+  // watched you say this" instead of just materializing in the log with
+  // no connection to the input line typed commands use.
+  const animateVoiceTranscript = (text) => {
+    if (voiceTypingTimer.current) window.clearInterval(voiceTypingTimer.current);
+    setVoiceTyping(true);
+    const total = Math.min(900, 150 + text.length * 8);
+    const stepMs = Math.max(8, total / text.length);
+    let i = 0;
+    voiceTypingTimer.current = window.setInterval(() => {
+      i += 1;
+      setInput(text.slice(0, i));
+      if (i >= text.length) {
+        window.clearInterval(voiceTypingTimer.current);
+        voiceTypingTimer.current = null;
+        window.setTimeout(() => {
+          setLog((prev) => [...prev, { role: 'user', text }]);
+          setInput('');
+          setVoiceTyping(false);
+        }, 200);
+      }
+    }, stepMs);
+  };
+
   // V.1: real voice events bridged from jarvis.py (the separate process
   // that actually owns the mic — wake word, STT, TTS) via server.py's
   // /internal/voice_event -> WS broadcast. This is what makes the meter
@@ -86,8 +141,13 @@ export default function VUCoreModule() {
       case 'listening_start':
         setVoiceState('listening');
         break;
+      case 'transcribing_start':
+        setVoiceState('transcribing');
+        break;
       case 'listening_end':
-        setVoiceState((s) => (s === 'listening' ? 'idle' : s));
+        // Closes out both 'listening' and 'transcribing' — see
+        // useVoiceState.js for why this one event covers both.
+        setVoiceState((s) => (s === 'listening' || s === 'transcribing' ? 'idle' : s));
         break;
       case 'processing_start':
         setVoiceState('thinking');
@@ -102,7 +162,7 @@ export default function VUCoreModule() {
         setVoiceState('idle');
         break;
       case 'transcript':
-        if (msg.text) setLog((prev) => [...prev, { role: 'user', text: msg.text }]);
+        if (msg.text) animateVoiceTranscript(msg.text);
         break;
       case 'reply':
         if (msg.text) setLog((prev) => [...prev, { role: 'jarvis', text: msg.text }]);
@@ -185,9 +245,19 @@ export default function VUCoreModule() {
     }
   };
 
+  // The VU meter's mock amplitude generator only knows the original five
+  // states — 'transcribing' would otherwise fall through to flat/silent,
+  // right when the meter should still read as "busy."
+  const meterState = voiceState === 'transcribing' ? 'thinking' : voiceState;
+
   return (
     <div className="vu-core">
-      <VUMeter state={voiceState} />
+      <div className="vu-core__status-row">
+        <VUMeter state={meterState} />
+        <span className={`chip chip--${STATE_CHIP_TONE[voiceState] || 'pending'} vu-core__status-chip`}>
+          {STATE_LABEL[voiceState] || STATE_LABEL.idle}
+        </span>
+      </div>
       <Teleprinter text={transcript} />
 
       <div className="vu-core__log" ref={logRef}>
@@ -209,10 +279,11 @@ export default function VUCoreModule() {
       </div>
 
       <form className="vu-core__command" onSubmit={handleSubmit}>
-        <span className="vu-core__prompt">›</span>
+        <span className="vu-core__prompt">{voiceTyping ? '\u{1F399}' : '›'}</span>
         <input
-          className="vu-core__input mono"
+          className={`vu-core__input mono${voiceTyping ? ' is-voice-typing' : ''}`}
           value={input}
+          readOnly={voiceTyping}
           onChange={(e) => {
             // Barge-in: the moment the user starts typing over Jarvis
             // talking, cut the audio rather than let it drone on under

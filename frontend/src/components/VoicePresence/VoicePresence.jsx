@@ -4,6 +4,7 @@ import './VoicePresence.css';
 const STATE_CLASS = {
   wake: 'is-wake',
   listening: 'is-listening',
+  transcribing: 'is-thinking',
   thinking: 'is-thinking',
   speaking: 'is-speaking',
   error: 'is-error',

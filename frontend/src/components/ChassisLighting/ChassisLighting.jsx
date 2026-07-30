@@ -4,6 +4,7 @@ import './ChassisLighting.css';
 const STATE_CLASS = {
   wake: 'is-listening',
   listening: 'is-listening',
+  transcribing: 'is-thinking',
   thinking: 'is-thinking',
   speaking: 'is-speaking',
 };

@@ -4,12 +4,12 @@ import { useWebSocket } from './useWebSocket.js';
 const START_EVENTS = {
   wake: 'wake',
   listening_start: 'listening',
+  transcribing_start: 'transcribing',
   processing_start: 'thinking',
   speaking_start: 'speaking',
 };
 
 const END_EVENTS = {
-  listening_end: 'listening',
   processing_end: 'thinking',
   speaking_end: 'speaking',
 };
@@ -44,6 +44,12 @@ export function useVoiceState() {
   useWebSocket((msg) => {
     if (START_EVENTS[msg.type]) {
       setWsState(START_EVENTS[msg.type]);
+    } else if (msg.type === 'listening_end') {
+      // Closes out BOTH 'listening' and 'transcribing' — transcribing
+      // starts partway through a single listen() call on the backend
+      // and listening_end always fires once that call returns, success
+      // or not, so it's the one reliable "done with this leg" signal.
+      setWsState((s) => (s === 'listening' || s === 'transcribing' ? 'idle' : s));
     } else if (END_EVENTS[msg.type]) {
       setWsState((s) => (s === END_EVENTS[msg.type] ? 'idle' : s));
     }

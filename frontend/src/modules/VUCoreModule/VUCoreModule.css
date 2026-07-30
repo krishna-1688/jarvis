@@ -5,6 +5,19 @@
   gap: 8px;
 }
 
+.vu-core__status-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.vu-core__status-row .vu-meter { flex: 1; min-width: 0; }
+
+.vu-core__status-chip {
+  flex-shrink: 0;
+  transition: color var(--dur-fast) var(--ease-standard);
+}
+
 .vu-core__log {
   flex: 1;
   min-height: 0;
@@ -98,3 +111,11 @@
 }
 
 .vu-core__input::placeholder { color: var(--ink-dim); }
+
+/* A voice transcript animating into the bar reads as "heard", not
+   "typed" — a faint glow instead of the focus ring, and no caret
+   fighting the animation since the field is read-only while it runs. */
+.vu-core__input.is-voice-typing {
+  color: var(--display-glow);
+  caret-color: transparent;
+}

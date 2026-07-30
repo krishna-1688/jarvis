@@ -1379,4 +1379,10 @@ async def stream_endpoint(websocket: WebSocket):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    # access_log=False: every WS heartbeat, voice-event bridge push, and
+    # frontend polling GET (health/tasks/schedule/...) was logging its own
+    # "INFO: ... 200 OK" line — all normal, expected background traffic,
+    # but it drowned out jarvis.py's actual conversation prints in the
+    # same terminal. Real errors still surface (FastAPI logs exceptions
+    # regardless), just not the routine 200s.
+    uvicorn.run(app, host="127.0.0.1", port=8000, access_log=False)

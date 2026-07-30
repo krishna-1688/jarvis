@@ -89,8 +89,10 @@ input {
 .chip--ok      { color: var(--safe); }
 .chip--warn    { color: var(--signal); }
 .chip--pending { color: var(--ink-dim); opacity: 0.6; }
-.chip--warn::before { box-shadow: 0 0 3px color-mix(in srgb, var(--signal) 70%, transparent); }
-.chip--ok::before   { box-shadow: 0 0 3px color-mix(in srgb, var(--safe) 60%, transparent); }
+.chip--error   { color: var(--error); }
+.chip--warn::before  { box-shadow: 0 0 3px color-mix(in srgb, var(--signal) 70%, transparent); }
+.chip--ok::before    { box-shadow: 0 0 3px color-mix(in srgb, var(--safe) 60%, transparent); }
+.chip--error::before { box-shadow: 0 0 3px color-mix(in srgb, var(--error) 70%, transparent); }
 
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-track { background: transparent; }
