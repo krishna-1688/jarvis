@@ -16,9 +16,10 @@ import json
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from groq import Groq
-from config import GROQ_API_KEY, GROQ_MODEL
+from config import GROQ_API_KEY, GROQ_CLASSIFIER_MODEL
 
-groq_client = Groq(api_key=GROQ_API_KEY)
+# max_retries=0 — see core/router.py's identical comment.
+groq_client = Groq(api_key=GROQ_API_KEY, max_retries=0, timeout=6.0)
 
 # Keep this list as a cheap pre-filter so we don't waste a Groq call
 # on messages that obviously have nothing to do with WhatsApp.
@@ -79,7 +80,7 @@ def extract_whatsapp_intent_groq(text: str) -> dict | None:
     try:
         prompt = EXTRACTION_PROMPT.replace("{user_input}", text)
         response = groq_client.chat.completions.create(
-            model=GROQ_MODEL,
+            model=GROQ_CLASSIFIER_MODEL,
             messages=[{"role": "user", "content": prompt}],
             max_tokens=100,
             temperature=0,

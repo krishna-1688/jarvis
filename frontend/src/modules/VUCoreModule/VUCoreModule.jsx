@@ -164,8 +164,21 @@ export default function VUCoreModule() {
       case 'transcript':
         if (msg.text) animateVoiceTranscript(msg.text);
         break;
+      // A slow multi-step action (VTOP fetch, Spotify's search-and-play
+      // automation) narrates what it's doing via this channel instead of
+      // leaving the Teleprinter blank until the final reply lands — the
+      // final reply overwrites this the moment it arrives, same as any
+      // other transcript text.
+      case 'progress':
+        if (msg.text) setTranscript(msg.text);
+        break;
       case 'reply':
         if (msg.text) setLog((prev) => [...prev, { role: 'jarvis', text: msg.text }]);
+        // Clears any leftover 'progress' text for the voice path — the
+        // typed-command path already clears transcript itself once its
+        // own reply lands (see runCommand), but a voice-triggered reply
+        // arrives straight over the WS with nothing else to do that.
+        setTranscript('');
         break;
       default:
         break;

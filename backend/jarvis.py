@@ -32,7 +32,8 @@ import requests
 
 from core.voice import (
     speak, listen, init_microphone,
-    is_shutdown_requested, _is_processing, set_expecting_confirmation
+    is_shutdown_requested, _is_processing, set_expecting_confirmation,
+    LISTEN_TIMEOUT
 )
 from core.wakeword import start_wakeword_listener, set_busy
 from core.voice_bridge import push_voice_event
@@ -144,16 +145,16 @@ GOODBYE_PHRASES = [
 ]
 
 # How many consecutive empty listen() cycles before dropping back to
-# standby. Each silent cycle is one LISTEN_TIMEOUT (8s) in core/voice.py,
-# so SILENCE_LIMIT=4 gives ~32s of "still thinking" tolerance instead of
-# the old ~16s, which felt like it kicked you out mid-thought.
-SILENCE_LIMIT = 4
+# standby. Each silent cycle is one LISTEN_TIMEOUT (7s, core/voice.py) —
+# KK wants exactly one silent cycle to drop back to standby (not idle
+# with the mic hot for 30+ seconds), so SILENCE_LIMIT=1 x 7s = 7s total.
+SILENCE_LIMIT = 1
 EMPTY_LIMIT   = 10
 
 def conversation_loop(first_input: str = None, typed_wake: bool = False):
     print("\n" + "─"*44)
     print("  💬 Active — speak or type + Enter")
-    print(f"  Silence x{SILENCE_LIMIT} → standby  |  ESC → shutdown")
+    print(f"  {LISTEN_TIMEOUT}s of silence → standby  |  ESC → shutdown")
     print("─"*44)
 
     silence_count = 0

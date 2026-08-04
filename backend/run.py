@@ -26,16 +26,29 @@ def main():
     client_proc = subprocess.Popen([python, "jarvis.py"], cwd=BACKEND_DIR)
 
     try:
-        client_proc.wait()
+        # Whichever process exits first takes the other one down with it.
+        # Previously this only ever waited on client_proc, so a backend-
+        # initiated shutdown (e.g. the "shutdown jarvis" voice command,
+        # which calls os._exit(0) inside server.py) left jarvis.py running
+        # as an orphan indefinitely — confirmed live: after several
+        # restarts during testing, multiple orphaned jarvis.py/run.py
+        # processes were still running in the background, each with live
+        # mic access, none of them reachable or visible as "the" running
+        # instance.
+        while client_proc.poll() is None and server_proc.poll() is None:
+            time.sleep(0.5)
     except KeyboardInterrupt:
         pass
     finally:
-        print("\nShutting down backend...")
-        server_proc.terminate()
-        try:
-            server_proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            server_proc.kill()
+        print("\nShutting down...")
+        for proc in (client_proc, server_proc):
+            if proc.poll() is None:
+                proc.terminate()
+        for proc in (client_proc, server_proc):
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
 
 
 if __name__ == "__main__":

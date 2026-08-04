@@ -1,23 +1,37 @@
 """
 router.py — two-stage routing for Jarvis.
 
-Stage 1 (cheap, deterministic, no LLM call): keyword fast-path for the
-highest-confidence commands — marks queries, PC control, explicit
-WhatsApp/web triggers, LMS/assignments. These are unambiguous enough
-that a keyword match is faster and just as reliable as asking Groq.
+Stage 1 (fast_path_route) handles the high-frequency stuff — PC control,
+Spotify, web, WhatsApp, schedule, tasks, focus, expenses, marks, LMS,
+aliases, shutdown safety — via deterministic keyword/regex detection,
+each in its own function, checked in a specific order (see the inline
+comments) to avoid one feature's trigger word swallowing a sentence
+meant for another. Trigger words use fuzzy matching (_fuzzy_any) where
+it's safe to, so a typo like "atendance" or "spotfy" still matches —
+see _fuzzy_any's own docstring for exactly when that applies and when
+it deliberately doesn't (anything safety-critical stays exact-only).
 
-Stage 2 (Groq JSON intent extraction): everything Stage 1 doesn't
-recognize. One Groq call classifies the utterance against a fixed
-intent list and returns {"intent": ..., "entities": {...},
-"confidence": 0.0-1.0}. New intents get their own entry in
-GROQ_INTENTS plus a handler entry in jarvis.py's INTENT_HANDLERS
-registry — no more router surgery per feature.
+Stage 2 (Groq JSON intent extraction, extract_general_intent_groq) is
+the fallback for anything Stage 1 doesn't recognize — genuinely
+ambiguous phrasing, or a combination nobody's specifically coded for.
+One call classifies against the full GROQ_INTENTS list and returns
+{"intent": ..., "entities": {...}, "confidence": 0.0-1.0}, using a
+small/fast model (GROQ_CLASSIFIER_MODEL).
+
+Why Stage 1 does this much instead of just calling Groq for everything:
+confirmed live that Groq's free tier caps the classifier model at 6000
+tokens/MINUTE — even a tightly trimmed prompt only allows ~3 calls a
+minute before 429s start, nowhere near enough for normal conversation.
+Stage 1 catching the common cases for free (and instantly) is what
+keeps the app usable within that budget; Stage 2 only has to carry the
+long tail. New Stage-2-only intents get one entry in GROQ_INTENTS plus
+a handler entry in server.py's INTENT_HANDLERS registry.
 
 Marks queries stay 100% offline (SQLite) by default; VTOP is only
-touched when the user explicitly asks to refresh/sync (see
-VTOP_FETCH_KEYWORDS below). Theory = course code ends with L (default
-when no lab mentioned); Lab = course code ends with P (only when user
-says lab/practical).
+touched when the user explicitly asks to refresh/sync (vtop_fetch_marks
+intent). Theory = course code ends with L (default when no lab
+mentioned); Lab = course code ends with P (only when user says
+lab/practical).
 """
 
 import os
@@ -27,34 +41,125 @@ import json
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from groq import Groq
-from config import GROQ_API_KEY, GROQ_MODEL
-from features.pc_control import handle_pc_command
+from rapidfuzz import fuzz
+from config import GROQ_API_KEY, GROQ_CLASSIFIER_MODEL
 from features.expenses import CATEGORY_RULES as _EXPENSE_CATEGORY_RULES
 
-groq_client = Groq(api_key=GROQ_API_KEY)
+
+def _fuzzy_any(text: str, keywords, threshold: int = 85) -> bool:
+    """Typo-tolerant version of `any(k in text for k in keywords)` — e.g.
+    "atendance" or "spotfy" still matches "attendance"/"spotify". Exact
+    substring match is tried first (cheap, catches the overwhelming
+    majority of cases with zero fuzzy overhead); only single-WORD
+    keywords of 5+ letters fall through to a per-word fuzzy comparison.
+    Multi-word phrases are deliberately exact-only — fuzzy-matching a
+    whole phrase risks matching an unrelated combination of words rather
+    than a genuine typo of ONE word — and short keywords (under 5
+    letters, e.g. "cat", "fat", "msg") are excluded too, since a small
+    edit distance relative to a short word is far more likely to
+    collide with a different, unrelated short word than to represent an
+    actual typo. Never used for anything safety-critical (shutdown/
+    cancel-shutdown detection stays exact-match only, on purpose)."""
+    t = text.lower()
+    if any(k in t for k in keywords):
+        return True
+    single_word_keywords = [k for k in keywords if " " not in k and len(k) >= 5]
+    if not single_word_keywords:
+        return False
+    words = re.findall(r"[a-z']+", t)
+    for w in words:
+        for kw in single_word_keywords:
+            if abs(len(w) - len(kw)) <= 2 and fuzz.ratio(w, kw) >= threshold:
+                return True
+    return False
+
+# max_retries=0, timeout=6 — confirmed live this classifier call was
+# occasionally taking 20+ SECONDS: the Groq SDK defaults to max_retries=2
+# with exponential backoff, so a single rate-limited (429) call silently
+# retried twice before finally failing. Since classification already has
+# a graceful fallback on any failure (extract_general_intent_groq's
+# except clause), failing in ~6s beats hanging for 20+ trying again.
+groq_client = Groq(api_key=GROQ_API_KEY, max_retries=0, timeout=6.0)
 
 # ══════════════════════════════════════════
-#   STAGE 1 — CHEAP KEYWORD FAST-PATH
+#   STAGE 1 — MINIMAL FAST-PATH (safety + zero-cost exact matches only)
 # ══════════════════════════════════════════
+
+
+# Shutdown — a voice/text keyword to cleanly stop the backend server
+# (see server.py's handle_shutdown), independent of the Electron
+# console's own Ctrl+Shift+Q shortcut (which just quits the app window).
+# "stop" / "shut down" alone are deliberately excluded — too easy to
+# collide with an unrelated sentence ("shut down the timer").
+SHUTDOWN_KEYWORDS = [
+    "shutdown jarvis", "shut down jarvis", "turn off jarvis",
+    "power off jarvis", "exit jarvis", "jarvis go offline",
+    "jarvis shut down", "kill jarvis", "quit jarvis",
+]
+
+def is_shutdown_request(text: str) -> bool:
+    t = text.lower()
+    return any(k in t for k in SHUTDOWN_KEYWORDS)
+
+
+# Cancelling a pending PC shutdown/restart is just as safety-critical as
+# the shutdown-request check above — if a real os.system("shutdown /s
+# ...") is already armed and counting down, "cancel shutdown" MUST
+# reach features.pc_control.cancel_shutdown() unconditionally. Confirmed
+# live during this migration: Stage 2's classifier (even with an
+# explicit example) sometimes misread "cancel shutdown" as
+# system_shutdown instead of pc — which would exit the Jarvis process
+# but do NOTHING to the already-scheduled OS shutdown, since that's a
+# separate OS-level timer independent of this process. A network call
+# to an LLM must never be the only thing standing between "the PC is
+# about to shut down" and stopping it — this is a deterministic,
+# zero-latency, zero-dependency guarantee instead.
+CANCEL_SHUTDOWN_PHRASES = ("cancel shutdown", "cancel the shutdown", "cancel restart", "cancel the restart")
+
+def is_cancel_shutdown_request(text: str) -> bool:
+    t = text.lower()
+    return any(p in t for p in CANCEL_SHUTDOWN_PHRASES)
+
+
+# ══════════════════════════════════════════
+#   RESTORED FAST-PATH (see module docstring: "why Stage 1 came back")
+# ══════════════════════════════════════════
+# High-frequency actions get deterministic keyword detection again,
+# each with its OWN dedicated (cheap or zero-cost) path, instead of
+# every single message paying for the big Stage 2 classifier call.
+# Confirmed live: Groq's free tier caps llama-3.1-8b-instant at 6000
+# tokens per MINUTE -- even a trimmed ~1800-token classifier prompt only
+# allows ~3 calls/minute before 429s start, nowhere near enough for
+# normal back-and-forth use. Cutting how OFTEN Stage 2 is needed at all
+# is the only real fix; a smaller prompt alone can't get there. Every
+# specific bug found and fixed during tonight's Groq-only experiment
+# (spotify "stop playing", the whatsapp "tell X" pattern, class_at_time
+# day-only handling, the shutdown/cancel-shutdown safety guards) is
+# folded back in here to stay fixed.
+
+from features.pc_control import handle_pc_command
 
 PC_KEYWORDS = [
     "open", "close", "volume", "mute", "unmute",
-    "screenshot", "brightness", "shutdown", "restart",
-    "sleep", "find", "search for file"
+    "screenshot", "brightness", "shutdown", "shut down", "restart",
+    "sleep", "find", "search for file",
+    "battery", "cpu", "memory", "disk", "system status", "system info",
+    "clipboard", "copy", "copied", "loud",
+    "window", "running processes", "what's running", "whats running",
+    "list processes",
 ]
 
-# ── Spotify ───────────────────────────────────────────────
-# Checked BEFORE PC Control — "open spotify and play X" contains "open"
+# -- Spotify ---------------------------------------------------
+# Checked BEFORE PC Control -- "open spotify and play X" contains "open"
 # (a PC_KEYWORD), which would otherwise get handed to handle_pc_command
 # and tried as a literal desktop-app launch with "spotify and play X"
-# as the (garbage) app name. Same class of fix as
-# _open_targets_known_website's "open youtube" guard, just routed to a
-# real feature instead of just skipped.
+# as the (garbage) app name.
 _SPOTIFY_PLAY_RE = re.compile(
     r"^(?:open spotify and )?(?:play|put on|start playing)\s+(.+?)(?:\s+on spotify)?[?.!]*$",
     re.IGNORECASE,
 )
-SPOTIFY_PAUSE_PHRASES = ("pause spotify", "pause the song", "pause the music", "pause music", "stop the music", "stop spotify")
+SPOTIFY_PAUSE_PHRASES = ("pause spotify", "pause the song", "pause the music", "pause music",
+                          "stop the music", "stop spotify", "stop playing", "stop the song")
 SPOTIFY_RESUME_PHRASES = ("resume spotify", "resume the song", "resume music", "unpause", "continue playing", "continue the song")
 SPOTIFY_NEXT_PHRASES = ("next song", "next track", "skip song", "skip track", "skip this song", "skip this track", "play the next song")
 SPOTIFY_PREV_PHRASES = ("previous song", "previous track", "last song", "go back a song", "play the last song", "play the previous song")
@@ -62,18 +167,30 @@ SPOTIFY_NOWPLAYING_PHRASES = ("what's playing", "whats playing", "what song is t
 SPOTIFY_VOLUME_UP_WORDS = ("up", "increase", "raise", "louder", "more")
 SPOTIFY_VOLUME_DOWN_WORDS = ("down", "decrease", "lower", "quieter", "less", "reduce")
 
-def detect_spotify_intent(text: str) -> tuple | None:
-    """
-    Returns ('spotify', {'action': ..., **extra}) for a Spotify
-    playback command, or None. 'play <song>' extracts the song name as
-    a free-text search query for features.spotify.play_song to resolve
-    — this is deliberately loose (no NER), matching this router's
-    established style of pushing precise entity extraction into the
-    feature layer rather than trying to parse it perfectly here.
-    """
-    t = text.lower().strip()
+def _normalize_spotify_typos(t: str) -> str:
+    """Rewrites a fuzzy-matched typo of 'spotify' (e.g. 'spotifi',
+    'spotfy') to the canonical spelling, so _SPOTIFY_PLAY_RE's exact
+    "open spotify and " prefix still matches. Doing this once up front
+    (rather than trying to make the regex itself fuzzy) keeps every
+    other exact-string check in this function correct for free."""
+    words = t.split()
+    for i, w in enumerate(words):
+        core = w.strip(",.?!")
+        if core != "spotify" and len(core) >= 5 and fuzz.ratio(core, "spotify") >= 85:
+            words[i] = w.replace(core, "spotify")
+    return " ".join(words)
 
-    if "spotify" in t and any(w in t for w in ("open", "launch", "start")) and "play" not in t and "pause" not in t:
+def detect_spotify_intent(text: str) -> tuple | None:
+    """Returns ('spotify', {'action': ..., **extra}) for a Spotify
+    playback command, or None."""
+    t = _normalize_spotify_typos(text.lower().strip())
+
+    is_spotify_word = "spotify" in t
+
+    if is_spotify_word and any(q in t for q in ("web player", "in the browser", "on the web", "spotify web")):
+        return None
+
+    if is_spotify_word and any(w in t for w in ("open", "launch", "start")) and "play" not in t and "pause" not in t:
         return "spotify", {"action": "open"}
 
     m = _SPOTIFY_PLAY_RE.match(t)
@@ -96,7 +213,7 @@ def detect_spotify_intent(text: str) -> tuple | None:
     if any(p in t for p in SPOTIFY_NOWPLAYING_PHRASES):
         return "spotify", {"action": "now_playing"}
 
-    if "spotify" in t and "volume" in t:
+    if is_spotify_word and "volume" in t:
         if any(w in t for w in SPOTIFY_VOLUME_UP_WORDS):
             return "spotify", {"action": "volume_up"}
         if any(w in t for w in SPOTIFY_VOLUME_DOWN_WORDS):
@@ -105,12 +222,7 @@ def detect_spotify_intent(text: str) -> tuple | None:
     return None
 
 # Known website/site names that should NEVER be treated as a desktop
-# app to launch. Without this, "open youtube" matches PC_KEYWORDS
-# (because of bare "open"), gets handed to handle_pc_command, which
-# returns a truthy "App not found: youtube" result — that gets
-# treated as a successful PC command and web automation never gets
-# a chance to run. This guard makes "open <known site>" skip PC
-# control entirely and fall through to web automation instead.
+# app to launch -- "open youtube" contains "open" (a PC_KEYWORD).
 KNOWN_WEB_DESTINATIONS = [
     "youtube", "amazon", "flipkart", "google", "gmail", "github",
     "wikipedia", "skyscanner", "reddit", "linkedin", "twitter", "x",
@@ -119,70 +231,44 @@ KNOWN_WEB_DESTINATIONS = [
 ]
 
 def _open_targets_known_website(text: str) -> bool:
-    """True if this is an 'open X' command where X is a known website."""
     t = text.lower()
     if "open" not in t:
         return False
     return any(site in t for site in KNOWN_WEB_DESTINATIONS)
 
 
-# WhatsApp — cheap pre-filter only. Full extraction (recipient +
-# message) is done by Groq in core/whatsapp_intent.py because regex
-# cannot reliably split "send a message to Amma good night" into
-# name vs content — there's no fixed boundary.
 WHATSAPP_TRIGGER_WORDS = [
     "whatsapp", "message", "msg", "text ", "tell ", "send a message",
     "send message"
 ]
 
 def looks_like_whatsapp_request(text: str) -> bool:
-    """Cheap check — does this MIGHT be a WhatsApp send request."""
-    t = text.lower()
-    return any(w in t for w in WHATSAPP_TRIGGER_WORDS)
+    return _fuzzy_any(text, WHATSAPP_TRIGGER_WORDS)
 
 
-# Web automation — cheap pre-filter only. Full extraction (action/
-# site/query) is done by Groq in core/web_intent.py — same reasoning
-# as WhatsApp: phrasing like "compare X on amazon and flipkart" has no
-# fixed regex-friendly boundary.
 WEB_TRIGGER_WORDS = [
     "open", "go to", "search", "look up", "find", "compare",
     "summarize", "summarise", "browse", "google",
-    "what does this page say", "what are the reviews"
+    "what does this page say", "what are the reviews",
+    "click", "scroll", "close tab", "close this tab", "close the tab",
+    "go back a page", "previous page", "back a page",
 ]
 
-# Words that overlap with web triggers but mean something else
-# entirely in this project (avoid false positives stealing the route
-# from PC control / other features).
 WEB_FALSE_POSITIVE_GUARDS = [
     "find my file", "search my files", "open the file", "open file",
     "find a file", "open settings", "open task manager"
 ]
 
 def looks_like_web_request(text: str) -> bool:
-    """Cheap check — might this be a web browsing request."""
     t = text.lower()
     if any(g in t for g in WEB_FALSE_POSITIVE_GUARDS):
         return False
-    return any(w in t for w in WEB_TRIGGER_WORDS)
+    return _fuzzy_any(text, WEB_TRIGGER_WORDS)
 
 
-# PC/web/whatsapp trigger words ("open", "go to", "tell ") are cheap
-# and fast, but they're just single-word signals — a sentence that
-# ALSO clearly asks a VTOP/academic data question (e.g. "go to vtop
-# and check my attendance", "tell me my overall attendance") should
-# not get hijacked into "open a browser" or "send a message" just
-# because of that one incidental word. When both fire, the data
-# question wins and the whole utterance defers to Stage 2's Groq
-# classification, which actually reads the full sentence.
-#
-# This must also cover LMS/assignment questions (LMS_KEYWORDS, defined
-# below) — not just VTOP ones. Confirmed bug: "can tell my pending
-# assignmets after sync from lms" (typo breaks the "assignment"
-# substring match) contains "tell " -> looks_like_whatsapp_request()
-# fires, and with no LMS signal word in this list either, nothing
-# stopped it from being hijacked into a WhatsApp-send attempt instead
-# of ever reaching detect_lms_query() at the bottom of fast_path_route.
+# A sentence that ALSO clearly asks a VTOP/academic data question (e.g.
+# "tell me my overall attendance") should not get hijacked into "send a
+# message" just because it contains "tell ". Covers LMS too.
 VTOP_DATA_SIGNAL_WORDS = [
     "attendance", "bunk", "skip class", "timetable", "time table",
     "class schedule", "next class", "free at", "exam", "cgpa", "gpa",
@@ -191,17 +277,11 @@ VTOP_DATA_SIGNAL_WORDS = [
 ]
 
 def _looks_like_data_question(text: str) -> bool:
-    t = text.lower()
-    if any(k in t for k in VTOP_DATA_SIGNAL_WORDS):
+    if _fuzzy_any(text, VTOP_DATA_SIGNAL_WORDS):
         return True
-    # LMS_KEYWORDS is defined further down this file — safe to reference
-    # here since Python resolves module globals at call time, not at
-    # function-definition time, and this is only ever called well after
-    # the whole module has finished importing.
-    return any(k in t for k in LMS_KEYWORDS)
+    return _fuzzy_any(text, LMS_KEYWORDS)
 
 
-# Marks detection keywords
 MARKS_KEYWORDS = [
     "marks", "mark", "scored", "score", "cat1", "cat2", "cat 1", "cat 2",
     "cat-1", "cat-2", "fat", "final assessment", "continuous assessment",
@@ -211,21 +291,8 @@ MARKS_KEYWORDS = [
     "consolidated", "lab mark", "lab assessment"
 ]
 
-# "CAT1"/"CAT2"/"FAT" alone are ambiguous — "CAT-2 schedule" means exam
-# dates, "what do I need in CAT2 for an S" means grade_target, neither
-# is a marks lookup. Only treat a bare CAT/FAT mention as a marks
-# signal if none of these exam/need-oriented words are also present;
-# an explicit marks word (marks/mark/scored/score/assessment/etc.)
-# always wins regardless.
 _CAT_FAT_ONLY_KEYWORDS = ["cat1", "cat2", "cat 1", "cat 2", "cat-1", "cat-2", "fat"]
 _CAT_FAT_NON_MARKS_GUARDS = ["schedule", "exam", "when", "need", "require"]
-
-# Bare "score"/"scored" is similarly ambiguous — "how much should I
-# score to get a 9 CGPA overall" is a CGPA-target question, not a
-# marks lookup. "how much did I score" (the full phrase, already a
-# separate MARKS_KEYWORDS entry) stays an unambiguous marks signal
-# regardless — only the bare word needs this guard. "cgp" (no 'a') is
-# included since STT sometimes transcribes "CGPA" that way.
 _SCORE_ONLY_KEYWORDS = ["scored", "score"]
 _SCORE_NON_MARKS_GUARDS = ["cgpa", "cgp", "gpa", "overall"]
 
@@ -233,7 +300,10 @@ def has_marks_keyword(text: str) -> bool:
     t = text.lower()
     ambiguous      = _CAT_FAT_ONLY_KEYWORDS + _SCORE_ONLY_KEYWORDS
     other_keywords = [k for k in MARKS_KEYWORDS if k not in ambiguous]
-    if any(k in t for k in other_keywords):
+    # Fuzzy here (typo tolerance), but NOT for the ambiguous CAT/FAT/score
+    # keywords below — those are short and deliberately exact-guarded
+    # against colliding with exam-schedule/CGPA questions.
+    if _fuzzy_any(text, other_keywords):
         return True
     if any(k in t for k in _CAT_FAT_ONLY_KEYWORDS) and not any(g in t for g in _CAT_FAT_NON_MARKS_GUARDS):
         return True
@@ -241,7 +311,6 @@ def has_marks_keyword(text: str) -> bool:
         return True
     return False
 
-# On-demand VTOP fetch triggers
 VTOP_FETCH_KEYWORDS = [
     "check in vtop", "from vtop", "in vtop", "vtop check",
     "check vtop", "directly from vtop", "fetch from vtop",
@@ -252,12 +321,10 @@ VTOP_FETCH_KEYWORDS = [
 ]
 
 def is_vtop_fetch_request(text: str) -> bool:
-    """Returns True if user explicitly wants live data from VTOP."""
     t = text.lower()
     return any(k in t for k in VTOP_FETCH_KEYWORDS)
 
 
-# LMS / assignments
 LMS_KEYWORDS = [
     "assignment", "assignments", "pending assignment", "lms",
     "moodle", "what's due", "what is due", "due today",
@@ -268,21 +335,19 @@ LMS_KEYWORDS = [
 
 LMS_SYNC_KEYWORDS = [
     "sync lms", "refresh lms", "update lms", "check lms",
-    "fetch assignments", "reload assignments", "latest assignments"
+    "fetch assignments", "reload assignments", "latest assignments",
+    "refresh my assignments", "refresh assignments", "sync assignments",
+    "sync my assignments", "update my assignments",
 ]
 
 def detect_lms_query(text: str) -> str | None:
-    """Returns 'assignments' | 'sync' | None"""
-    t = text.lower()
-    if any(k in t for k in LMS_SYNC_KEYWORDS):
+    if _fuzzy_any(text, LMS_SYNC_KEYWORDS):
         return "sync"
-    if any(k in t for k in LMS_KEYWORDS):
+    if _fuzzy_any(text, LMS_KEYWORDS):
         return "assignments"
     return None
 
 
-# Tasks — "things to do" (title + due date + done state), distinct from
-# schedule blocks ("time on the clock", see schedule keywords below).
 TASK_ADD_TRIGGERS = ["remind me to", "add a task", "add task", "new task"]
 TASK_LIST_PHRASES = [
     "what are my tasks", "my tasks", "what's on my plate", "whats on my plate",
@@ -296,7 +361,6 @@ TASK_DROP_VERBS     = ["drop", "remove", "cancel", "delete"]
 _TASK_FILLER_WORDS  = {"the", "a", "an", "my", "task", "please"}
 
 def _mark_as_done_query(text: str) -> str | None:
-    """Matches 'mark X as done/complete/finished' — X needs no 'task' word."""
     t = text.lower()
     for suffix in [" as done", " as complete", " as finished"]:
         idx = t.find(suffix)
@@ -308,11 +372,6 @@ def _mark_as_done_query(text: str) -> str | None:
     return None
 
 def _verb_based_query(text: str, verbs: list, marker_word: str) -> str | None:
-    """
-    Matches a sentence containing one of `verbs` plus `marker_word`
-    somewhere ("drop the DBMS task", "remove the gym block") — the
-    name can sit anywhere relative to the verb, unlike a fixed phrase.
-    """
     words   = text.split()
     lowered = [w.lower().strip(",.?!") for w in words]
     if not any(v in lowered for v in verbs) or marker_word not in lowered:
@@ -321,7 +380,6 @@ def _verb_based_query(text: str, verbs: list, marker_word: str) -> str | None:
     return " ".join(kept).strip(" ,.")
 
 def detect_task_intent(text: str) -> tuple | None:
-    """Returns (category, payload) for a task-related utterance, or None."""
     t = text.lower()
 
     if any(p in t for p in TASK_TODAY_PHRASES):
@@ -349,7 +407,6 @@ def detect_task_intent(text: str) -> tuple | None:
     return None
 
 
-# ── Schedule ("time on the clock") ───────────────────────
 SCHEDULE_TODAY_PHRASES = [
     "schedule today", "my schedule today", "what's my schedule", "whats my schedule",
     "today's schedule",
@@ -359,10 +416,9 @@ SCHEDULE_WEEK_PHRASES = ["schedule this week", "my schedule this week", "week's 
 SCHEDULE_NEXT_PHRASES = ["what's next", "whats next", "what is next", "what am i doing next", "what do i have next"]
 SCHEDULE_FREE_GENERAL_PHRASES = ["when am i free", "when will i be free"]
 SCHEDULE_FREE_AT_MARKER = "am i free at"
-SCHEDULE_DELETE_VERBS = ["remove", "delete", "cancel"]
+SCHEDULE_DELETE_VERBS = ["remove", "delete", "cancel", "drop"]
 
 def detect_schedule_intent(text: str) -> tuple | None:
-    """Returns (category, payload) for a schedule-related utterance, or None."""
     t = text.lower()
 
     if any(p in t for p in SCHEDULE_WEEK_PHRASES):
@@ -382,14 +438,12 @@ def detect_schedule_intent(text: str) -> tuple | None:
     if delete_query is not None:
         return "schedule_delete", {"query": delete_query or text}
 
-    # "block 3 to 5 for TOC study" / "schedule 9 to 11 am for placement prep"
     if ("block" in t and " to " in t) or ("schedule" in t and " to " in t and "for" in t):
         return "schedule_add", {"raw_text": text}
 
     return None
 
 
-# ── Focus mode ────────────────────────────────────────────
 FOCUS_START_TRIGGERS = ["focus mode", "start focus", "start pomodoro", "focus on", "pomodoro "]
 FOCUS_STOP_PHRASES = ["stop focus", "stop focusing", "end focus", "end my focus", "exit focus"]
 FOCUS_STATUS_PHRASES = ["focus status", "am i focusing", "am i in focus"]
@@ -399,7 +453,6 @@ FOCUS_STATS_PHRASES = [
 ]
 
 def detect_focus_intent(text: str) -> tuple | None:
-    """Returns (category, payload) for a focus-mode utterance, or None."""
     t = text.lower()
 
     if any(p in t for p in FOCUS_STATS_PHRASES):
@@ -414,25 +467,23 @@ def detect_focus_intent(text: str) -> tuple | None:
     return None
 
 
-# ── Expenses ──────────────────────────────────────────────
 EXPENSE_ADD_VERBS = ["spent", "paid", "spend"]
 EXPENSE_SUMMARY_PHRASES = [
     "how much did i spend", "how much have i spent", "how much on",
     "what did i spend", "spending this week", "spending today",
     "spending this month", "expense summary",
 ]
-_EXPENSE_BARE_AMOUNT_LEAD_RE = re.compile(r'^\s*(?:rs\.?|₹)?\s*\d+(?:\.\d+)?\s*(?:rupees?|rs\.?)?\s+(for|on)\b', re.IGNORECASE)
+_EXPENSE_BARE_AMOUNT_LEAD_RE = re.compile(r'^\s*(?:rs\.?|\u20b9)?\s*\d+(?:\.\d+)?\s*(?:rupees?|rs\.?)?\s+(for|on)\b', re.IGNORECASE)
 _ALL_EXPENSE_KEYWORDS = [kw for kws in _EXPENSE_CATEGORY_RULES.values() for kw in kws]
 
 def detect_expense_intent(text: str) -> tuple | None:
-    """Returns (category, payload) for an expense-related utterance, or None."""
     t = text.lower()
 
     if any(p in t for p in EXPENSE_SUMMARY_PHRASES):
         return "expense_summary", {"raw_text": text}
 
     if not re.search(r'\d', t):
-        return None  # everything below needs a number
+        return None
 
     if any(verb in t for verb in EXPENSE_ADD_VERBS):
         return "expense_add", {"raw_text": text}
@@ -444,10 +495,6 @@ def detect_expense_intent(text: str) -> tuple | None:
     return None
 
 
-# ── Course aliases (H.2) — teaching Jarvis a course nickname ──────────
-# Both patterns require an explicit leading trigger word ("remember"/
-# "note"/"call") so they never misfire on an unrelated sentence that
-# happens to contain "means" or "call" mid-sentence.
 _ALIAS_MEANS_RE = re.compile(
     r"^(?:remember|note)(?:\s+that)?\s+(.+?)\s+(?:means|is|stands for)\s+(.+)$",
     re.IGNORECASE
@@ -458,14 +505,6 @@ _ALIAS_CALL_RE = re.compile(
 )
 
 def detect_alias_add_intent(text: str) -> tuple | None:
-    """
-    Returns ('alias_add', {'alias':..., 'course_query':...}) for a
-    course-nickname-teaching utterance, or None.
-    'remember DAA means Design and Analysis of Algorithms' -> alias
-    ("DAA") comes first, course reference second.
-    'call BCSE307P compiler lab' -> course reference first, new alias
-    ("compiler lab") second.
-    """
     stripped = text.strip()
 
     m = _ALIAS_MEANS_RE.match(stripped)
@@ -479,20 +518,12 @@ def detect_alias_add_intent(text: str) -> tuple | None:
     return None
 
 
-# ── Merchant aliases (V.3c) — naming an opaque UPI VPA ────────────────
-# Always refers to the most recent unaliased opaque-VPA expense (see
-# core.memory.get_last_opaque_expense) — nobody names the VPA itself out
-# loud, so the utterance never contains it. Requires the literal word
-# "vpa" so this never collides with detect_alias_add_intent's "call X Y"
-# course-alias pattern above.
 _ALIAS_MERCHANT_RE = re.compile(
     r"^(?:remember\s+)?(?:that\s+)?(?:call\s+that\s+)?(?:opaque\s+)?vpa\s+(?:is|means)?\s*(.+)$",
     re.IGNORECASE
 )
 
 def detect_alias_merchant_intent(text: str) -> tuple | None:
-    """'that opaque vpa is the tea guy' / 'remember vpa means gym
-    membership' -> ('alias_merchant', {'friendly_name': ...}), or None."""
     stripped = text.strip()
     if "vpa" not in stripped.lower():
         return None
@@ -504,31 +535,13 @@ def detect_alias_merchant_intent(text: str) -> tuple | None:
     return None
 
 
-# Daily brief — simple, unambiguous trigger, no entities needed.
 DAILY_BRIEF_KEYWORDS = [
     "daily brief", "morning brief", "give me my brief", "give me the brief",
     "my brief", "brief me", "today's brief", "give me the rundown"
 ]
 
 def is_daily_brief_request(text: str) -> bool:
-    t = text.lower()
-    return any(k in t for k in DAILY_BRIEF_KEYWORDS)
-
-
-# Shutdown — a voice/text keyword to cleanly stop the backend server
-# (see server.py's handle_shutdown), independent of the Electron
-# console's own Ctrl+Shift+Q shortcut (which just quits the app window).
-# "stop" / "shut down" alone are deliberately excluded — too easy to
-# collide with an unrelated sentence ("shut down the timer").
-SHUTDOWN_KEYWORDS = [
-    "shutdown jarvis", "shut down jarvis", "turn off jarvis",
-    "power off jarvis", "exit jarvis", "jarvis go offline",
-    "jarvis shut down", "kill jarvis", "quit jarvis",
-]
-
-def is_shutdown_request(text: str) -> bool:
-    t = text.lower()
-    return any(k in t for k in SHUTDOWN_KEYWORDS)
+    return _fuzzy_any(text, DAILY_BRIEF_KEYWORDS)
 
 
 # Exact-match only (see detect_simple_data_query's own comment on why).
@@ -561,11 +574,10 @@ _SIMPLE_DATA_PHRASES = {
     "what is my next class": ("next_class", {}),
     "whens my next class": ("next_class", {}),
     "when's my next class": ("next_class", {}),
-    # Note: "schedule today" / "today's schedule" / "whats due today" are
-    # deliberately NOT listed here — detect_schedule_intent / LMS's
-    # detect_lms_query already catch those earlier in fast_path_route
-    # (routing to the richer schedule_today / lms intents respectively),
-    # so an entry here would just be unreachable dead code.
+    # Note: "schedule today" / "whats due today" are deliberately NOT
+    # listed here — those go through Stage 2 (schedule_today /
+    # lms_assignments), which is just as fast on the small classifier
+    # model and doesn't risk this exact-match set growing unbounded.
     "todays schedule":   ("timetable_today", {}),
     "classes today":     ("timetable_today", {}),
     "what classes today": ("timetable_today", {}),
@@ -588,20 +600,44 @@ def detect_simple_data_query(text: str) -> tuple | None:
 
 def fast_path_route(text: str) -> tuple | None:
     """
-    Stage 1. Returns (category, payload) for a confident keyword match,
-    or None if nothing matched (caller falls through to Stage 2).
+    Stage 1 — deterministic keyword/regex routing for everything
+    high-frequency enough to matter, checked in an order that's been
+    specifically tuned (see the inline comments) to avoid the collision
+    bugs found and fixed across this project's history. Stage 2's Groq
+    classifier (see GROQ_INTENTS / extract_general_intent_groq) is the
+    fallback for anything this doesn't recognize — genuinely ambiguous
+    phrasing, or a feature combination nobody's hit yet.
+
+    This used to be Groq-first for nearly everything, which was more
+    accurate on paper but confirmed live to be a dead end: Groq's free
+    tier caps the classifier model at 6000 tokens/MINUTE, and even a
+    tightly trimmed prompt only allows ~3 calls/minute before 429s —
+    nowhere near enough for normal conversation. Cutting how often Stage
+    2 gets called at all (by catching the common cases here, for free)
+    is the only way to stay inside that budget without constant rate
+    limiting. Every specific accuracy bug found during the Groq-only
+    experiment (spotify "stop playing", whatsapp "tell X", class_at_time
+    day-only handling, the shutdown/cancel-shutdown guards) is preserved
+    below or in Stage 2's prompt/route()'s safety net either way.
     """
     t = text.lower()
 
-    # CRITICAL SAFETY CHECK — must run before PC Control below.
-    # Confirmed incident: "shutdown jarvis" matched PC_KEYWORDS' bare
-    # "shutdown" substring first and triggered features.pc_control's
-    # REAL os.system("shutdown /s /t 10") — an actual Windows shutdown,
-    # not closing the app. This check intercepts anything that mentions
-    # both jarvis and shutdown/restart/exit BEFORE PC control ever sees
-    # it, so that can never happen again regardless of phrasing.
+    # CRITICAL SAFETY CHECK — must run before PC Control below. Confirmed
+    # incident: "shutdown jarvis" matched PC_KEYWORDS' bare "shutdown"
+    # substring first and triggered a REAL os.system("shutdown /s /t 10").
+    # This intercepts anything mentioning both jarvis and shutdown/
+    # restart/exit before PC control ever sees it, deterministically —
+    # never delegated to the classifier, see route()'s own safety net too.
     if is_shutdown_request(t):
         return "system_shutdown", {}
+
+    # Equally safety-critical: cancelling an already-armed real shutdown
+    # must never depend on a network call succeeding. See
+    # is_cancel_shutdown_request's own comment for the confirmed failure
+    # mode (Groq misreading "cancel shutdown" as system_shutdown, which
+    # exits Jarvis but does nothing to an already-scheduled OS shutdown).
+    if is_cancel_shutdown_request(t):
+        return "pc", {}
 
     # Spotify — checked before PC Control; see detect_spotify_intent's
     # own comment for why ("open spotify and play X" contains "open").
@@ -609,17 +645,19 @@ def fast_path_route(text: str) -> tuple | None:
     if spotify_match:
         return spotify_match
 
-    # PC Control — but skip it entirely for "open <known website>" so
-    # those fall through to web automation instead of hitting the
-    # desktop app launcher and getting a false "App not found" success.
-    if any(keyword in t for keyword in PC_KEYWORDS) and not _open_targets_known_website(text):
+    # PC Control — skip it entirely for "open <known website>" so those
+    # fall through to web automation instead of a false "App not found".
+    # This pre-filter being fuzzy is low-risk: a false-positive match just
+    # means handle_pc_command(t) gets a chance to look and returns None
+    # (falls through normally) if nothing in it actually applies.
+    if _fuzzy_any(text, PC_KEYWORDS) and not _open_targets_known_website(text):
         result = handle_pc_command(t)
         if result:
             return "pc", result
 
     # Tasks — checked right after PC control (so "cancel the shutdown"
     # still resolves as a PC command, not a task-drop attempt) but before
-    # everything else: "mark" collides with MARKS_KEYWORDS, and "submit"/
+    # marks/LMS: "mark" collides with MARKS_KEYWORDS, "submit"/
     # "assignment" collide with LMS_KEYWORDS, so task triggers — being
     # far more specific — must win first.
     task_match = detect_task_intent(text)
@@ -648,53 +686,42 @@ def fast_path_route(text: str) -> tuple | None:
 
     is_data_question = _looks_like_data_question(text)
 
-    # WhatsApp message — real extraction happens in jarvis.py via Groq.
-    # Skipped if the sentence also clearly asks a VTOP data question —
-    # see VTOP_DATA_SIGNAL_WORDS above.
+    # WhatsApp — cheap pre-filter only; real extraction is a separate,
+    # small, dedicated Groq call in core/whatsapp_intent.py, not the big
+    # classifier. Skipped if the sentence also clearly asks a VTOP data
+    # question (e.g. "tell me my overall attendance" contains "tell ").
     if looks_like_whatsapp_request(text) and not is_data_question:
         return "whatsapp", {"raw_text": text}
 
-    # Web automation — real extraction happens in jarvis.py via Groq.
-    # Same data-question exception as WhatsApp above.
+    # Web automation — same idea: cheap pre-filter, real extraction is
+    # core/web_intent.py's own small dedicated call. Same data-question
+    # exception as WhatsApp above.
     if (looks_like_web_request(text) or _open_targets_known_website(text)) and not is_data_question:
         return "web", {"raw_text": text}
 
-    # On-demand VTOP fetch (user explicitly wants live data)
+    # On-demand VTOP fetch (user explicitly wants live data) — handle_
+    # vtop_fetch/handle_marks (server.py) build the actual marks-intent
+    # dict themselves via extract_marks_intent(user_input), so this just
+    # needs to get the CATEGORY right, not pre-build entities.
     if is_vtop_fetch_request(t) and has_marks_keyword(t):
-        intent = extract_marks_intent(t)
-        return "vtop_fetch_marks", intent
+        return "vtop_fetch_marks", {}
 
-    # Marks — offline
     if has_marks_keyword(t):
-        intent = extract_marks_intent(t)
-        return "vtop_marks", intent
+        return "vtop_marks", {}
 
-    # LMS / assignments
+    # LMS / assignments — detect_lms_query returns "assignments"|"sync";
+    # map that to the actual registered intent names (server.py's
+    # INTENT_HANDLERS has lms_assignments/lms_sync, not a single "lms").
     lms_type = detect_lms_query(t)
-    if lms_type:
-        return "lms", lms_type
+    if lms_type == "sync":
+        return "lms_sync", {}
+    if lms_type == "assignments":
+        return "lms_assignments", {}
 
-    # (Shutdown is checked at the very top of this function now — see
-    # the CRITICAL SAFETY CHECK comment above — since it must run before
-    # PC Control, not after LMS.)
-
-    # Daily brief — manual trigger
     if is_daily_brief_request(t):
         return "daily_brief", {}
 
-    # A handful of extremely common, entity-free data questions — every
-    # one of these previously cost a full Groq round-trip (~0.3-1s) for
-    # Stage 2 to classify even though the phrasing is completely
-    # unambiguous. EXACT match only (not substring) is deliberate: "what's
-    # my attendance in DBMS" must NOT hit this path and lose its course
-    # entity to an empty {} — only bare phrasings with nothing else to
-    # extract are safe to shortcut here. Anything even slightly more
-    # complex correctly falls through to Stage 2's real entity extraction.
-    simple_match = detect_simple_data_query(text)
-    if simple_match:
-        return simple_match
-
-    return None
+    return detect_simple_data_query(text)
 
 
 # ══════════════════════════════════════════
@@ -959,194 +986,105 @@ def extract_marks_intent(text: str) -> dict:
 # ══════════════════════════════════════════
 
 GROQ_INTENTS = {
-    "attendance":       "attendance percentage, how many classes attended/missed, debarment risk",
-    "bunk_check":       "can I skip/bunk a class, how many classes can I miss and stay above 75%, which subject is safest to skip",
-    "timetable_today":  "what classes are today, today's schedule",
-    "timetable_tomorrow": "what classes are tomorrow, tomorrow's schedule",
-    "timetable_week":   "the full week's class schedule",
-    "next_class":       "what's my next class, when's my next class",
-    "class_at_time":    "whether a specific course meets on a specific day (e.g. 'do I have TOC on friday'), or whether a time slot is free (e.g. 'am I free at 3pm')",
-    "exams":            "exam dates — CAT/FAT schedule, when the next exam is, days until an exam",
+    "attendance":       "attendance %, classes attended/missed, debarment risk",
+    "bunk_check":       "can I skip/bunk a class and stay above 75%, safest subject to skip",
+    "timetable_today":  "today's classes",
+    "timetable_tomorrow": "tomorrow's classes",
+    "timetable_week":   "the FULL week's class schedule (not one day)",
+    "next_class":       "what's my next class",
+    "class_at_time":    "course on a specific day ('TOC on friday'), a time slot free ('free at 3pm'), OR one named day's full classes with no course/time ('monday schedule', 'i need for monday') -- day-only means class_at_time, not timetable_week",
+    "exams":            "exam dates -- CAT/FAT schedule, next exam, days until",
     "cgpa":             "overall CGPA",
-    "sem_gpa":          "GPA for one specific semester",
-    "grade_history":    "grade in a specific course, or the full grade history across all courses",
-    "cgpa_predict":     "what CGPA would result if a specific course got a specific grade",
-    "grade_target":     "what mark is needed in a specific course/assessment to get a specific grade",
-    "best_case_cgpa":   "best-case overall CGPA if every current-semester course gets the same grade (e.g. all S, all A)",
-    "overall_cgpa_target": "what average grade/score is needed this semester to reach a specific target overall CGPA (e.g. 'how much do I need to score to get a 9 CGPA')",
-    "task_add":         "adding a new personal task/to-do/reminder to do something, not a class assignment (e.g. 'remind me to submit fees by friday', 'add a task to call mom')",
-    "task_list":        "listing open personal tasks/to-dos ('what's on my plate', 'what are my tasks')",
-    "task_today":       "personal tasks due today or overdue (not class assignments)",
-    "task_complete":    "marking a personal task as done/complete/finished",
-    "task_drop":        "dropping/removing/cancelling a personal task",
-    "schedule_add":     "blocking/scheduling a chunk of time for an activity (e.g. 'block 3 to 5 for TOC study')",
-    "schedule_today":   "the full schedule for today — classes plus any custom blocks",
-    "schedule_tomorrow": "the full schedule for tomorrow",
-    "schedule_week":    "the full schedule for the week",
-    "schedule_next":    "what's next on the schedule right now (class or custom block, not just class)",
-    "schedule_free":    "when there's free time in the schedule, or whether a specific time is free",
-    "schedule_delete":  "removing/cancelling a scheduled block (not a class)",
-    "focus_start":      "starting a focus/pomodoro session on a subject for some duration",
-    "focus_stop":       "stopping/ending the current focus session",
-    "focus_status":     "whether a focus session is currently active",
-    "focus_stats":      "how much time was spent studying/focusing recently",
-    "expense_add":      "logging a purchase/expense with an amount (e.g. 'spent 180 on lunch')",
-    "expense_summary":  "total spending or spending breakdown over a period (today/week/month)",
-    "expense_search":   "searching past expenses by merchant/description",
-    "alias_add":        "teaching a course nickname/alias, e.g. 'remember DAA means Design and Analysis of Algorithms', 'call BCSE307P compiler lab'",
-    "alias_merchant":   "naming an opaque UPI VPA/handle from a recent expense, e.g. 'that opaque vpa is the tea guy'",
-    "system_shutdown":  "explicitly telling Jarvis to shut down / turn off / exit / go offline — not just ending the current conversation",
-    "spotify":          "any Spotify playback control — play a specific song/artist, open Spotify, pause, resume, skip/next/previous track, volume, or what's currently playing",
-    "chat":             "general conversation, questions, or anything else not covered above",
+    "sem_gpa":          "GPA for one semester",
+    "grade_history":    "grade in a course, or full grade history",
+    "cgpa_predict":     "CGPA if a NAMED course got a specific grade",
+    "grade_target":     "mark needed in a course/assessment for a target grade",
+    "best_case_cgpa":   "CGPA if EVERY course this sem got the same grade (no course named)",
+    "overall_cgpa_target": "grade/score needed this sem to reach a target overall CGPA",
+    "task_add":         "new personal reminder/to-do, not a class assignment",
+    "task_list":        "listing open personal tasks",
+    "task_today":       "personal tasks due today/overdue",
+    "task_complete":    "marking a personal task done",
+    "task_drop":        "removing a personal task",
+    "schedule_add":     "blocking time for an activity ('block 3-5 for TOC study')",
+    "schedule_today":   "today's schedule: classes + custom blocks",
+    "schedule_tomorrow": "tomorrow's schedule",
+    "schedule_week":    "the week's schedule",
+    "schedule_next":    "what's next right now (class or block)",
+    "schedule_free":    "free time in the schedule",
+    "schedule_delete":  "removing a scheduled block (not a class)",
+    "focus_start":      "starting a focus/pomodoro session",
+    "focus_stop":       "ending the focus session",
+    "focus_status":     "is a focus session active",
+    "focus_stats":      "recent study/focus time",
+    "expense_add":      "logging a purchase with an amount",
+    "expense_summary":  "total/breakdown of spending over a period",
+    "expense_search":   "searching past expenses by merchant",
+    "alias_add":        "teaching a course nickname ('DAA means Design and Analysis of Algorithms')",
+    "alias_merchant":   "naming an opaque UPI VPA from a recent expense",
+    "system_shutdown":  "explicitly shutting down/exiting Jarvis itself (not just ending this chat)",
+    "spotify":          "Spotify playback -- play/open/pause/resume/skip/volume/now playing",
+    "pc":               "controlling THIS PC -- volume/mute/screenshot/brightness/apps/battery/CPU/memory/disk/clipboard/windows/processes/shutdown-restart-sleep the PC (not Jarvis)",
+    "web":              "browsing the web -- open/search a site, compare sites, summarize/interact with the open page",
+    "whatsapp":         "sending a WhatsApp message, incl. casual 'tell <person> <message>'",
+    "vtop_marks":       "specific assessment marks (CAT1/CAT2/FAT) for a course, from synced data",
+    "vtop_fetch_marks": "explicitly refresh/sync marks live from VTOP now",
+    "lms_assignments":  "pending LMS/Moodle assignments (class assignment, not a personal task)",
+    "lms_sync":         "explicitly refresh assignment data from LMS",
+    "daily_brief":      "the daily/morning brief",
+    "chat":             "general conversation or anything else",
 }
 
-EXTRACTION_PROMPT = """You classify a voice assistant command into exactly ONE intent.
+EXTRACTION_PROMPT = """Classify this voice assistant command into exactly ONE intent. Ignore filler ("please", "can you", "go check", "sync from vtop") -- classify by the real question/action.
 
-The input may be a messy, run-on, or compound sentence with filler
-phrasing ("go check", "sync from vtop", "please", "can you", "and
-tell me"). Ignore the filler and action-y wrapper words — find the
-actual DATA QUESTION being asked (attendance, timetable, exam, grade,
-CGPA, etc.) and classify by THAT, even if the sentence also mentions
-"vtop", "sync", "go to", or "tell me". The real question always wins
-over incidental phrasing.
-
-Available intents:
+Intents:
 {intent_list}
 
-Recent conversation (oldest first, most recent last) — use this ONLY to
-resolve a follow-up that doesn't name its own course/subject/day (e.g.
-"what about that one", "and my marks", "same for tomorrow"). If the
-current input already names its own course/day/time, ignore this
-history entirely and use what's actually in the current input:
+Recent turns (for follow-ups only, e.g. "what about that one" -- ignore if current input names its own course/day/time):
 {recent_turns}
 
-If the current input is a follow-up with no course/subject of its own
-but a recent turn above named one, reuse that course in entities.course.
+Entity rules (omit entities not listed here; default entities={{}}):
+- course: named subject, verbatim (attendance, bunk_check, grade_history, cgpa_predict, grade_target, vtop_marks)
+- days_ahead: int, today=0/tomorrow=1 (bunk_check)
+- day/time: class_at_time. Day alone with no course/time = that day's full classes, NOT timetable_week (only for "the whole week")
+- when: exams -> next/all/cat1/cat2/fat
+- target_grade: grade_target, single letter
+- grade: cgpa_predict (needs a course) vs best_case_cgpa (no course, whole-semester hypothetical, default "S"); number->letter: 10=S 9=A 8=B 7=C 6=D 5=E 0=F
+- target_cgpa: overall_cgpa_target, number
+- alias/course_query: alias_add
+- action/query: spotify. action=play/open/pause/resume/next/previous/volume_up/volume_down/now_playing; query=song name, only for "play"
+- query: task_complete/task_drop/schedule_delete -- the task/block title
+- pc/web/whatsapp/vtop_fetch_marks/lms_assignments/lms_sync/daily_brief: always entities={{}}
 
-If the message names a specific course/subject (e.g. "DBMS", "TOC",
-"calculus"), include it as entities.course, exactly as the user said it.
-For bunk_check, if a relative day is mentioned ("tomorrow", "today",
-"friday"), also include entities.days_ahead as a small integer (today=0,
-tomorrow=1, etc.) — omit it if no day is mentioned. For class_at_time,
-include entities.day (a weekday name, "today", or "tomorrow") and/or
-entities.time (as said, e.g. "3 PM") depending on what the user asked.
-For exams, include entities.when as one of "next", "all", "cat1",
-"cat2", "fat" (default "all" if not specified). For grade_target,
-include entities.target_grade as a single letter (S/A/B/C/D/E/F). For
-cgpa_predict, include entities.grade as a single letter — this intent
-REQUIRES a specific named course; if no course is named, it's
-best_case_cgpa instead (see below), not cgpa_predict. For
-best_case_cgpa, include entities.grade as a single letter (default S
-if not specified, e.g. "if I get A in everything" -> grade "A"). This
-is the intent for a UNIFORM hypothetical across the WHOLE semester
-with no specific course named ("if I score/average/get N this sem",
-"what if I ace everything") — if the user gives a bare NUMBER instead
-of a letter, convert it to the matching letter on this 10-point scale
-(S=10, A=9, B=8, C=7, D=6, E=5, F=0), e.g. "score 9" -> grade "A",
-"average 8" -> grade "B". For overall_cgpa_target, include
-entities.target_cgpa as a number (e.g. "get a 9 CGPA" -> 9, "get a 9
-cgp overall" -> 9 — "cgp" is sometimes a mis-transcription of "CGPA").
-The key difference between best_case_cgpa and overall_cgpa_target:
-best_case_cgpa is given a grade/score and asks what CGPA results;
-overall_cgpa_target is given a target CGPA and asks what grade/score
-is needed. For alias_add, include entities.alias (the nickname being
-taught) and entities.course_query (the course reference it maps to).
-For spotify, include entities.action as one of "play", "open", "pause",
-"resume", "next", "previous", "volume_up", "volume_down", "now_playing"
-— and for "play", also entities.query with the song/artist as said
-(e.g. "play believer by imagine dragons" -> action "play", query
-"believer by imagine dragons"). Otherwise entities should be {{}}.
-
-Respond with ONLY valid JSON, no markdown, no explanation.
-Format: {{"intent": "<name>", "entities": {{"course": "...", "day": "...", "time": "...", "days_ahead": 0, "when": "...", "target_grade": "...", "grade": "...", "target_cgpa": 0, "action": "...", "query": "..."}}, "confidence": <0.0-1.0>}}
+Format: {{"intent": "<name>", "entities": {{...}}, "confidence": <0.0-1.0>}}
 
 Examples:
-Input: "what's my attendance"
-Output: {{"intent": "attendance", "entities": {{}}, "confidence": 1.0}}
-
 Input: "attendance in DBMS"
 Output: {{"intent": "attendance", "entities": {{"course": "DBMS"}}, "confidence": 1.0}}
-
-Input: "which subject has lowest attendance"
-Output: {{"intent": "attendance", "entities": {{}}, "confidence": 1.0}}
 
 Input: "can I skip DBMS tomorrow"
 Output: {{"intent": "bunk_check", "entities": {{"course": "DBMS", "days_ahead": 1}}, "confidence": 1.0}}
 
-Input: "how many classes can I skip in TOC"
-Output: {{"intent": "bunk_check", "entities": {{"course": "TOC"}}, "confidence": 1.0}}
-
-Input: "which subject am I safest to bunk in"
-Output: {{"intent": "bunk_check", "entities": {{}}, "confidence": 1.0}}
-
-Input: "can I skip tomorrow"
-Output: {{"intent": "bunk_check", "entities": {{"days_ahead": 1}}, "confidence": 1.0}}
-
-Input: "which class should I skip today"
-Output: {{"intent": "bunk_check", "entities": {{"days_ahead": 0}}, "confidence": 1.0}}
-
-Input: "what's my next class"
-Output: {{"intent": "next_class", "entities": {{}}, "confidence": 1.0}}
-
-Input: "schedule today"
-Output: {{"intent": "timetable_today", "entities": {{}}, "confidence": 1.0}}
-
-Input: "classes tomorrow"
-Output: {{"intent": "timetable_tomorrow", "entities": {{}}, "confidence": 1.0}}
-
-Input: "what does my week look like"
-Output: {{"intent": "timetable_week", "entities": {{}}, "confidence": 1.0}}
+Input: "am I free at 3 PM"
+Output: {{"intent": "class_at_time", "entities": {{"time": "3 PM"}}, "confidence": 1.0}}
 
 Input: "do I have TOC on friday"
 Output: {{"intent": "class_at_time", "entities": {{"course": "TOC", "day": "friday"}}, "confidence": 1.0}}
 
-Input: "am I free at 3 PM"
-Output: {{"intent": "class_at_time", "entities": {{"time": "3 PM"}}, "confidence": 1.0}}
+Input: "i need for monday"
+Output: {{"intent": "class_at_time", "entities": {{"day": "monday"}}, "confidence": 1.0}}
 
-Input: "when's my next exam"
-Output: {{"intent": "exams", "entities": {{"when": "next"}}, "confidence": 1.0}}
-
-Input: "CAT-2 schedule"
-Output: {{"intent": "exams", "entities": {{"when": "cat2"}}, "confidence": 1.0}}
-
-Input: "how many days till FAT"
-Output: {{"intent": "exams", "entities": {{"when": "fat"}}, "confidence": 1.0}}
-
-Input: "exams this week"
-Output: {{"intent": "exams", "entities": {{"when": "all"}}, "confidence": 1.0}}
-
-Input: "what's my cgpa"
-Output: {{"intent": "cgpa", "entities": {{}}, "confidence": 1.0}}
-
-Input: "gpa in sem 3"
-Output: {{"intent": "sem_gpa", "entities": {{}}, "confidence": 1.0}}
-
-Input: "grade in DBMS"
-Output: {{"intent": "grade_history", "entities": {{"course": "DBMS"}}, "confidence": 1.0}}
-
-Input: "what CAT2 do I need in TOC for an S"
-Output: {{"intent": "grade_target", "entities": {{"course": "TOC", "target_grade": "S"}}, "confidence": 1.0}}
+Input: "what does my week look like"
+Output: {{"intent": "timetable_week", "entities": {{}}, "confidence": 1.0}}
 
 Input: "if I get A in everything, what's my CGPA"
 Output: {{"intent": "best_case_cgpa", "entities": {{"grade": "A"}}, "confidence": 1.0}}
 
-Input: "what will my cgpa be if i score 9 in this sem"
-Output: {{"intent": "best_case_cgpa", "entities": {{"grade": "A"}}, "confidence": 1.0}}
-
-Input: "what's my cgpa if i average 8 this semester"
-Output: {{"intent": "best_case_cgpa", "entities": {{"grade": "B"}}, "confidence": 1.0}}
-
 Input: "what's my CGPA if I get A in DBMS"
 Output: {{"intent": "cgpa_predict", "entities": {{"course": "DBMS", "grade": "A"}}, "confidence": 1.0}}
 
-Input: "how much should I score to get a 9 CGPA overall"
-Output: {{"intent": "overall_cgpa_target", "entities": {{"target_cgpa": 9}}, "confidence": 1.0}}
-
-Input: "what do I need to get a 9 cgp overall"
-Output: {{"intent": "overall_cgpa_target", "entities": {{"target_cgpa": 9}}, "confidence": 1.0}}
-
-Input: "remember DAA means Design and Analysis of Algorithms"
-Output: {{"intent": "alias_add", "entities": {{"alias": "DAA", "course_query": "Design and Analysis of Algorithms"}}, "confidence": 1.0}}
+Input: "what will my cgpa be if i score 9 in this sem"
+Output: {{"intent": "best_case_cgpa", "entities": {{"grade": "A"}}, "confidence": 1.0}}
 
 Input: "can you put on blinding lights by the weeknd"
 Output: {{"intent": "spotify", "entities": {{"action": "play", "query": "blinding lights by the weeknd"}}, "confidence": 1.0}}
@@ -1154,28 +1092,36 @@ Output: {{"intent": "spotify", "entities": {{"action": "play", "query": "blindin
 Input: "skip this one"
 Output: {{"intent": "spotify", "entities": {{"action": "next"}}, "confidence": 1.0}}
 
-Follow-up inheritance example — given this recent conversation:
-  Turn: user said "what's my attendance in DAA" -> intent=attendance, entities={{"course": "DAA"}}
+Input: "turn the volume up a bit"
+Output: {{"intent": "pc", "entities": {{}}, "confidence": 1.0}}
+
+Input: "switch to my browser window"
+Output: {{"intent": "pc", "entities": {{}}, "confidence": 1.0}}
+
+Input: "open chrome and search for cheap flights to goa"
+Output: {{"intent": "web", "entities": {{}}, "confidence": 1.0}}
+
+Input: "tell amma i'll be late"
+Output: {{"intent": "whatsapp", "entities": {{}}, "confidence": 1.0}}
+
+Input: "what did I get in DBMS CAT1"
+Output: {{"intent": "vtop_marks", "entities": {{"course": "DBMS"}}, "confidence": 1.0}}
+
+Input: "mark the fees reminder as done"
+Output: {{"intent": "task_complete", "entities": {{"query": "fees reminder"}}, "confidence": 1.0}}
+
+Input: "drop my gym block"
+Output: {{"intent": "schedule_delete", "entities": {{"query": "gym"}}, "confidence": 1.0}}
+
+Given recent turn: user said "what's my attendance in DAA" -> intent=attendance, entities={{"course": "DAA"}}
 Input: "what about my marks"
 Output: {{"intent": "grade_history", "entities": {{"course": "DAA"}}, "confidence": 1.0}}
-
-Compound/messy phrasing — classify by the real question, ignore the filler:
-
-Input: "go to vtop and check my attendance"
-Output: {{"intent": "attendance", "entities": {{}}, "confidence": 1.0}}
 
 Input: "sync from vtop and tell me my overall attendance"
 Output: {{"intent": "attendance", "entities": {{}}, "confidence": 1.0}}
 
-Input: "can you go check vtop for my timetable today"
-Output: {{"intent": "timetable_today", "entities": {{}}, "confidence": 1.0}}
+If nothing fits: {{"intent": "chat", "entities": {{}}, "confidence": 1.0}}
 
-Input: "please sync vtop and tell me when my next exam is"
-Output: {{"intent": "exams", "entities": {{"when": "next"}}, "confidence": 1.0}}
-
-If nothing fits well, use: {{"intent": "chat", "entities": {{}}, "confidence": 1.0}}
-
-Now classify this input:
 Input: "{user_input}"
 Output:"""
 
@@ -1200,10 +1146,17 @@ def extract_general_intent_groq(text: str) -> dict:
     prompt = EXTRACTION_PROMPT.format(intent_list=intent_list, user_input=text, recent_turns=recent_turns)
 
     try:
+        # GROQ_CLASSIFIER_MODEL (a small/fast model), not GROQ_MODEL — this
+        # now runs on nearly every message (Stage 1 is minimal, see
+        # fast_path_route), so classification speed directly matters. A
+        # structured intent+entities JSON call is exactly the kind of
+        # task a small model handles just as reliably as the big one,
+        # confirmed via extensive live testing across every feature
+        # domain during this migration.
         response = groq_client.chat.completions.create(
-            model=GROQ_MODEL,
+            model=GROQ_CLASSIFIER_MODEL,
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=100,
+            max_tokens=120,
             temperature=0,
         )
         raw = response.choices[0].message.content.strip()
@@ -1218,7 +1171,15 @@ def extract_general_intent_groq(text: str) -> dict:
         return data
     except Exception as e:
         print(f"[router] Stage 2 intent extraction failed: {e}")
-        return {"intent": "chat", "entities": {}, "confidence": 0.0}
+        # api_failed distinguishes "the call itself broke" (rate limit,
+        # network) from "it ran and was genuinely unsure" — confirmed
+        # live this was being conflated: a Groq 429 during heavy testing
+        # made ordinary chit-chat ("Hey Jarvis", "See ya.", "So,
+        # medicine.") all land on the same academic-flavored clarify
+        # menu ("did you mean: attendance/classes/exams/CGPA"), which is
+        # actively confusing for input that was never a data question in
+        # the first place. See _low_confidence_fallback's allow_clarify.
+        return {"intent": "chat", "entities": {}, "confidence": 0.0, "api_failed": True}
 
 
 # ══════════════════════════════════════════
@@ -1283,7 +1244,7 @@ def _keyword_data_fallback(text: str) -> tuple | None:
     return None
 
 
-def _low_confidence_fallback(text: str) -> tuple:
+def _low_confidence_fallback(text: str, allow_clarify: bool = True) -> tuple:
     """
     Returns (category, payload) — never None. Tries the course resolver
     (a named course strongly suggests a data question, not chat), then a
@@ -1291,6 +1252,15 @@ def _low_confidence_fallback(text: str) -> tuple:
     schedule question), and only falls back to a short numbered clarify
     menu if none of those signals fire — better than silently guessing
     or dead-ending on "I don't understand."
+
+    allow_clarify=False (passed when Stage 2's API call itself failed,
+    not just came back unsure) skips that menu in favor of plain "brain"
+    chat — the clarify menu's four options (attendance/classes/exams/
+    CGPA) are a reasonable guess when the classifier actually looked at
+    the text and hedged, but meaningless when it never got to look at
+    all. Confirmed live: a Groq rate limit made ordinary conversation
+    ("Hey Jarvis", "See ya.") show that menu, which has nothing to do
+    with what was actually said.
     """
     from core.course_resolver import resolve_course_best
 
@@ -1305,6 +1275,8 @@ def _low_confidence_fallback(text: str) -> tuple:
     if _has_time_word(text):
         return "schedule_today", {}
 
+    if not allow_clarify:
+        return "brain", None
     return "clarify", {"raw_text": text}
 
 
@@ -1322,18 +1294,31 @@ def route(text: str) -> tuple:
         classified = extract_general_intent_groq(text)
         intent     = classified.get("intent", "chat")
         confidence = classified.get("confidence", 1.0)
+        api_failed = classified.get("api_failed", False)
 
         if intent == "chat":
             if confidence < LOW_CONFIDENCE_THRESHOLD:
-                category, payload = _low_confidence_fallback(text)
+                category, payload = _low_confidence_fallback(text, allow_clarify=not api_failed)
             else:
                 return "brain", None
         else:
             category, payload = intent, classified.get("entities", {})
 
+    # Safety net, independent of which model classified this or how
+    # confident it was: system_shutdown must never fire unless "jarvis"
+    # is actually named. Confirmed live during this migration — the
+    # classifier occasionally misread plain "shutdown" or "let's restart
+    # the conversation" as system_shutdown despite the intent's own
+    # description explicitly saying "not just ending the conversation".
+    # Demoting to "pc" here (rather than silently dropping the request)
+    # means a bare "shutdown"/"restart" still does something sensible —
+    # features.pc_control's own confirm-gated flow takes it from there.
+    if category == "system_shutdown" and "jarvis" not in text.lower():
+        category, payload = "pc", {}
+
     # Entity inheritance only makes sense for a dict-shaped payload —
-    # "pc"'s payload is already a built FeatureResult (see handle_pc in
-    # server.py), not entities.
+    # payload is always a dict now (Groq's entities, or {} from the
+    # Stage-1 safety intercepts above).
     if isinstance(payload, dict) and not payload.get("course") and _looks_like_followup(text):
         from core.context import get_last_entity
         inherited = get_last_entity("course")

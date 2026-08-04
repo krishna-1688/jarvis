@@ -46,6 +46,13 @@ _browser      = None
 _context      = None
 _current_page = None
 
+# Persisted login-session cookies/localStorage so a clean backend restart
+# doesn't force KK to re-log into Gmail/LinkedIn/GitHub/etc. every time —
+# same data/ directory pattern as features/spotify.py's .spotify_cache.
+_SESSION_STATE_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "browser_state.json"
+)
+
 
 def _ensure_browser():
     """Launch Playwright + Chrome ONCE, reuse afterwards. Visible window."""
@@ -65,7 +72,8 @@ def _ensure_browser():
             headless=False,          # KK wants to SEE Jarvis working
             args=["--start-maximized"]
         )
-        _context = _browser.new_context(no_viewport=True)
+        state_arg = _SESSION_STATE_PATH if os.path.exists(_SESSION_STATE_PATH) else None
+        _context = _browser.new_context(no_viewport=True, storage_state=state_arg)
         _current_page = _context.new_page()
 
 
@@ -88,8 +96,23 @@ def _close_browser_unsafe():
     _current_page = None
 
 
+def save_browser_session() -> None:
+    """Persists cookies/localStorage to disk so logged-in sessions survive
+    a backend restart. Call before closing the browser, not after — the
+    context has to still be alive to read its own storage state."""
+    with _pw_lock:
+        if _context is None:
+            return
+        try:
+            os.makedirs(os.path.dirname(_SESSION_STATE_PATH), exist_ok=True)
+            _context.storage_state(path=_SESSION_STATE_PATH)
+        except Exception as e:
+            print(f"[web_control] failed to save session state: {e}")
+
+
 def close_browser():
     """Public — call this if KK says 'close the browser' or on Jarvis shutdown."""
+    save_browser_session()
     with _pw_lock:
         _close_browser_unsafe()
 
@@ -128,6 +151,27 @@ KNOWN_SITES = {
     "x":          {"url": "https://twitter.com",        "search_selector": "input[data-testid='SearchBox_Search_Input']"},
     "vtop":       {"url": "https://vtopcc.vit.ac.in/vtop/login", "search_selector": None},
     "moodle":     {"url": "https://lms.vit.ac.in",      "search_selector": None},
+
+    # Previously "known" only as PC-launch guards in core/router.py's
+    # KNOWN_WEB_DESTINATIONS (so "open facebook" etc. correctly skipped
+    # PC app-launch) but had no real entry here — silently fell through
+    # to a broken literal Google search of the site's own name. Fixed.
+    "chrome":        {"url": "https://www.google.com",   "search_selector": "textarea[name='q'], input[name='q']"},
+    "browser":       {"url": "https://www.google.com",   "search_selector": "textarea[name='q'], input[name='q']"},
+    "facebook":      {"url": "https://www.facebook.com",  "search_selector": "input[aria-label*='Search' i]"},
+    "instagram":     {"url": "https://www.instagram.com", "search_selector": None},  # search lives behind a nav icon, no stable pre-click selector
+    "netflix":       {"url": "https://www.netflix.com/browse", "search_selector": None},  # same reason as instagram
+    "whatsapp web":  {"url": "https://web.whatsapp.com",  "search_selector": None},  # QR login-gated, same rationale as vtop/moodle
+    "spotify web":   {"url": "https://open.spotify.com",  "search_selector": None},  # only reached via the explicit "web"-qualifier carve-out in detect_spotify_intent
+
+    # CS-student-relevant sites (KK is CSE at VIT Chennai).
+    "leetcode":      {"url": "https://leetcode.com",           "search_selector": "input[placeholder*='Search' i]"},
+    "hackerrank":    {"url": "https://www.hackerrank.com",     "search_selector": "input[name='search']"},
+    "codeforces":    {"url": "https://codeforces.com",         "search_selector": "input[name='q']"},
+    "geeksforgeeks": {"url": "https://www.geeksforgeeks.org",  "search_selector": "input#head_search_input, input.head-search-input"},
+    "stackoverflow": {"url": "https://stackoverflow.com",      "search_selector": "input[name='q']"},
+    "chatgpt":       {"url": "https://chatgpt.com",            "search_selector": None},  # compose box, not a search bar
+    "claude":        {"url": "https://claude.ai",               "search_selector": None},  # same
 }
 
 GENERIC_SEARCH_SELECTORS = [
@@ -144,7 +188,16 @@ def _resolve_site(site_name: str) -> dict | None:
     s = site_name.lower().strip()
     if s in KNOWN_SITES:
         return KNOWN_SITES[s]
-    for key, val in KNOWN_SITES.items():
+    # Substring fallback for near-miss phrasing ("netflix app" -> "netflix").
+    # Short keys (e.g. the single-letter "x" alias for twitter) are excluded
+    # here since almost any string contains a 1-2 char substring by
+    # accident (e.g. "netflix" contains "x") — an exact match above already
+    # covers those short keys correctly, so this loop only needs to handle
+    # genuinely fuzzy multi-word cases. Longest key first so a more
+    # specific name (e.g. "whatsapp web") wins over a shorter one it embeds.
+    for key, val in sorted(KNOWN_SITES.items(), key=lambda kv: -len(kv[0])):
+        if len(key) < 4:
+            continue
         if key in s or s in key:
             return val
     return None
@@ -274,9 +327,20 @@ def get_page_text(max_chars: int = 6000) -> FeatureResult:
     page = _get_page()
     try:
         title = page.title()
-        # innerText pulls only visible, rendered text — skips hidden
-        # nav junk far better than raw HTML would.
-        text = page.evaluate("() => document.body.innerText")
+        html = page.content()
+        text = ""
+        try:
+            from readability import Document
+            from bs4 import BeautifulSoup
+            cleaned_html = Document(html).summary()
+            text = BeautifulSoup(cleaned_html, "html.parser").get_text(separator="\n").strip()
+        except Exception:
+            text = ""
+        # Readability strips nav/boilerplate but can find too little on
+        # heavily-JS-rendered SPAs — fall back to raw innerText rather
+        # than returning an unhelpfully short summary.
+        if len(text) < 200:
+            text = page.evaluate("() => document.body.innerText")
         text = re.sub(r'\n{3,}', '\n\n', text).strip()
         if len(text) > max_chars:
             text = text[:max_chars]
@@ -344,6 +408,64 @@ def compare_across_sites(query: str, site_a: str, site_b: str) -> FeatureResult:
             results[site] = {"ok": False, "error": str(e)}
 
     return FeatureResult(ok=True, data={"query": query, "results": results}, display="", spoken="")
+
+
+# ══════════════════════════════════════════
+#   6. POST-SEARCH PAGE INTERACTION
+# ══════════════════════════════════════════
+# There was previously no way to act on a page after opening/searching it
+# — click a result, scroll, go back, or close the tab. These make the
+# browser feel steerable rather than one-shot.
+
+def click_result(n: int) -> FeatureResult:
+    """Clicks the Nth link on the current page (1-indexed, matching how
+    people say 'click the second one')."""
+    page = _get_page()
+    try:
+        page.get_by_role("link").nth(max(0, n - 1)).click()
+        page.wait_for_load_state("domcontentloaded", timeout=15000)
+        return FeatureResult(ok=True, data={"n": n, "url": page.url}, display="", spoken="")
+    except Exception as e:
+        return FeatureResult(ok=False, data={}, display="", spoken="", error=str(e))
+
+
+def scroll_page(direction: str = "down") -> FeatureResult:
+    page = _get_page()
+    try:
+        delta = 800 if direction == "down" else -800
+        page.mouse.wheel(0, delta)
+        return FeatureResult(ok=True, data={"direction": direction}, display="", spoken="")
+    except Exception as e:
+        return FeatureResult(ok=False, data={}, display="", spoken="", error=str(e))
+
+
+def go_back() -> FeatureResult:
+    page = _get_page()
+    try:
+        page.go_back(wait_until="domcontentloaded", timeout=15000)
+        return FeatureResult(ok=True, data={"url": page.url}, display="", spoken="")
+    except Exception as e:
+        return FeatureResult(ok=False, data={}, display="", spoken="", error=str(e))
+
+
+def close_current_tab() -> FeatureResult:
+    """Closes the active tab. Falls back to the browser's remaining last
+    tab, or a fresh blank one if that was the only tab open, so there's
+    always a live page for the next command."""
+    global _current_page
+    with _pw_lock:
+        if _current_page is None:
+            return FeatureResult(ok=False, data={}, display="", spoken="", error="No tab open")
+        try:
+            _current_page.close()
+        except Exception:
+            pass
+        try:
+            remaining = _context.pages
+            _current_page = remaining[-1] if remaining else _context.new_page()
+        except Exception as e:
+            return FeatureResult(ok=False, data={}, display="", spoken="", error=str(e))
+    return FeatureResult(ok=True, data={}, display="", spoken="")
 
 
 # ══════════════════════════════════════════

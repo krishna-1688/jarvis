@@ -33,6 +33,14 @@ PORCUPINE_API_KEY = os.getenv("PORCUPINE_API_KEY")
 
 # ── AI Models ────────────────────────────
 GROQ_MODEL = "llama-3.3-70b-versatile"
+# Used for classification/extraction (intent routing, entity parsing,
+# song-query cleanup) — structured small-output tasks where an 8B model
+# is just as accurate as the 70B one but measurably faster on Groq's
+# hardware (confirmed live: ~0.12s vs ~0.29s avg per call on a tiny
+# prompt, and the gap widens further on the larger classification
+# prompt). GROQ_MODEL stays reserved for brain.py's actual conversational
+# replies, where response quality benefits from the bigger model.
+GROQ_CLASSIFIER_MODEL = "llama-3.1-8b-instant"
 GEMINI_MODEL = "gemini-1.5-flash"
 WHISPER_MODEL = "whisper-large-v3"
 

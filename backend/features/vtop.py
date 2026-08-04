@@ -1227,6 +1227,16 @@ def _check_class_at(entities: dict) -> FeatureResult:
             spoken  = "Yes, you're free then."
         return FeatureResult(ok=True, data={"day": day, "busy": bool(busy)}, display=display, spoken=spoken)
 
+    # Day given but no course/time — "what's my monday schedule", "i need
+    # for monday", "classes on friday" all mean "show me that whole day's
+    # classes", not a yes/no check. Previously fell through to the
+    # missing_entity message below no matter what day was named (or, when
+    # the classifier picked a different intent for this same kind of
+    # phrasing, silently defaulted to TODAY's classes instead of the named
+    # day) — reuse the same day-formatting the today/tomorrow modes use.
+    if entities.get("day"):
+        return _format_day_classes(day, classes, day)
+
     msg = "Tell me a course or a time to check."
     return FeatureResult(ok=False, data={}, display=msg, spoken=msg, error="missing_entity")
 

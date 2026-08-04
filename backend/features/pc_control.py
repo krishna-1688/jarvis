@@ -2,74 +2,270 @@ import os
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import shutil
 import subprocess
 import pyautogui
 import psutil
-from ctypes import cast, POINTER
-from comtypes import CLSCTX_ALL
+import pyperclip
+import pygetwindow as gw
+from pycaw.pycaw import AudioUtilities
+from rapidfuzz import fuzz, process as rf_process
 
 from features.base import FeatureResult
 
-# ── Volume Control (using pyautogui keys) ─
+# ── Volume Control (real level via pycaw, not blind keypresses) ─
+_volume_interface = None
+
+def _ensure_com():
+    """pycaw's AudioUtilities calls comtypes internals directly — on
+    whatever thread first touches it, COM must already be initialized or
+    it raises "CoInitialize has not been called" (confirmed live via
+    features/spotify.py's identical pywinauto issue: FastAPI/Starlette
+    runs sync route handlers on a worker-thread pool, and COM state is
+    per-thread). Safe to call repeatedly."""
+    import comtypes
+    try:
+        comtypes.CoInitialize()
+    except (OSError, comtypes.COMError):
+        pass
+
+def _volume_iface():
+    global _volume_interface
+    if _volume_interface is None:
+        _ensure_com()
+        _volume_interface = AudioUtilities.GetSpeakers().EndpointVolume
+    return _volume_interface
+
+def get_volume_level():
+    level = round(_volume_iface().GetMasterVolumeLevelScalar() * 100)
+    return True, f"Volume is at {level}%"
+
+def is_muted() -> bool:
+    return bool(_volume_iface().GetMute())
+
 def volume_up():
-    for _ in range(5):
-        pyautogui.press('volumeup')
-    return True, "Volume increased"
+    iface = _volume_iface()
+    level = min(1.0, iface.GetMasterVolumeLevelScalar() + 0.10)
+    iface.SetMasterVolumeLevelScalar(level, None)
+    return True, f"Volume increased to {round(level * 100)}%"
 
 def volume_down():
-    for _ in range(5):
-        pyautogui.press('volumedown')
-    return True, "Volume decreased"
+    iface = _volume_iface()
+    level = max(0.0, iface.GetMasterVolumeLevelScalar() - 0.10)
+    iface.SetMasterVolumeLevelScalar(level, None)
+    return True, f"Volume decreased to {round(level * 100)}%"
 
 def mute_volume():
-    pyautogui.press('volumemute')
+    # Real state check instead of a blind toggle keypress — calling this
+    # while already muted used to just un-mute it again (the toggle had
+    # no idea what state it was actually in).
+    if is_muted():
+        return True, "Already muted"
+    _volume_iface().SetMute(1, None)
     return True, "Muted"
 
 def unmute_volume():
-    pyautogui.press('volumemute')
+    if not is_muted():
+        return True, "Already unmuted"
+    _volume_iface().SetMute(0, None)
     return True, "Unmuted"
+
+# ── System info (psutil) ──────────────────
+def get_system_status(topic: str = None):
+    if topic == "battery":
+        batt = psutil.sensors_battery()
+        if not batt:
+            return False, "No battery detected — this looks like a desktop."
+        plugged = " (plugged in)" if batt.power_plugged else ""
+        return True, f"Battery is at {round(batt.percent)}%{plugged}"
+    if topic == "cpu":
+        return True, f"CPU usage is at {round(psutil.cpu_percent(interval=0.5))}%"
+    if topic == "memory":
+        return True, f"Memory usage is at {round(psutil.virtual_memory().percent)}%"
+    if topic == "disk":
+        return True, f"Disk is at {round(psutil.disk_usage(os.path.expanduser('~')).percent)}% full"
+
+    parts = [f"CPU {round(psutil.cpu_percent(interval=0.5))}%",
+             f"Memory {round(psutil.virtual_memory().percent)}%",
+             f"Disk {round(psutil.disk_usage(os.path.expanduser('~')).percent)}%"]
+    batt = psutil.sensors_battery()
+    if batt:
+        parts.append(f"Battery {round(batt.percent)}%")
+    return True, "System status — " + ", ".join(parts)
+
+# ── Clipboard ──────────────────────────────
+def get_clipboard_text():
+    text = pyperclip.paste()
+    if not text or not text.strip():
+        return False, "Clipboard is empty"
+    preview = text if len(text) <= 200 else text[:200] + "..."
+    return True, f"Clipboard: {preview}"
 
 # ── App Control ───────────────────────────
 APP_MAP = {
-    "chrome":        "chrome.exe",
-    "google":        "chrome.exe",
-    "spotify":       "spotify.exe",
-    "vs code":       "code.exe",
-    "vscode":        "code.exe",
-    "notepad":       "notepad.exe",
-    "calculator":    "calc.exe",
-    "whatsapp":      "whatsapp.exe",
-    "file explorer": "explorer.exe",
-    "explorer":      "explorer.exe",
-    "task manager":  "taskmgr.exe",
-    "discord":       "discord.exe",
-    "telegram":      "telegram.exe",
+    "chrome":         "chrome.exe",
+    "google":         "chrome.exe",
+    "spotify":        "spotify.exe",
+    "vs code":        "code.exe",
+    "vscode":         "code.exe",
+    "notepad":        "notepad.exe",
+    "calculator":     "calc.exe",
+    "whatsapp":       "whatsapp.exe",
+    "file explorer":  "explorer.exe",
+    "explorer":       "explorer.exe",
+    "task manager":   "taskmgr.exe",
+    "discord":        "discord.exe",
+    "telegram":       "telegram.exe",
+    "word":           "winword.exe",
+    "excel":          "excel.exe",
+    "powerpoint":     "powerpnt.exe",
+    "outlook":        "outlook.exe",
+    "edge":           "msedge.exe",
+    "firefox":        "firefox.exe",
+    "zoom":           "Zoom.exe",
+    "teams":          "ms-teams.exe",
+    "slack":          "slack.exe",
+    "steam":          "steam.exe",
+    "vlc":            "vlc.exe",
+    "paint":          "mspaint.exe",
+    "snipping tool":  "SnippingTool.exe",
+    "cmd":            "cmd.exe",
+    "command prompt": "cmd.exe",
+    "powershell":     "powershell.exe",
 }
+
+def _resolve_app_fuzzy(app_name: str, threshold: int = 75):
+    match = rf_process.extractOne(app_name, APP_MAP.keys(), scorer=fuzz.WRatio)
+    if match and match[1] >= threshold:
+        return APP_MAP[match[0]]
+    return None
 
 def open_app(app_name):
     app = app_name.lower().strip()
-    if app in APP_MAP:
+    exe = APP_MAP.get(app) or _resolve_app_fuzzy(app)
+    if exe:
         try:
-            subprocess.Popen(APP_MAP[app])
+            subprocess.Popen(exe)
             return True, f"Opening {app_name}"
         except Exception:
             return False, f"Could not open {app_name}"
-    else:
+
+    resolved_path = shutil.which(app)
+    if resolved_path:
         try:
-            subprocess.Popen(app)
-            return True, f"Trying to open {app_name}"
+            subprocess.Popen(resolved_path)
+            return True, f"Opening {app_name}"
         except Exception:
-            return False, f"App not found: {app_name}"
+            return False, f"Could not open {app_name}"
+
+    try:
+        subprocess.Popen(app)
+        return True, f"Trying to open {app_name}"
+    except Exception:
+        return False, f"App not found: {app_name}"
+
+def kill_process_fuzzy(name_query: str, threshold: int = 70):
+    all_names = sorted(set(
+        p.info['name'] for p in psutil.process_iter(['name']) if p.info['name']
+    ))
+    match = rf_process.extractOne(name_query, all_names, scorer=fuzz.WRatio)
+    if not match or match[1] < threshold:
+        return False, f"No running process matching '{name_query}'"
+    target = match[0]
+    killed = 0
+    for p in psutil.process_iter(['name']):
+        if p.info['name'] == target:
+            try:
+                p.kill()
+                killed += 1
+            except Exception:
+                pass
+    return (killed > 0), (f"Closed {target}" if killed else f"Couldn't close {target}")
+
+def list_processes(name_filter: str = None):
+    names = sorted(set(
+        p.info['name'] for p in psutil.process_iter(['name']) if p.info['name']
+    ))
+    if name_filter:
+        names = [n for n in names if name_filter.lower() in n.lower()]
+    if not names:
+        return False, "No matching processes found"
+    preview = ", ".join(names[:15])
+    more = f" (+{len(names) - 15} more)" if len(names) > 15 else ""
+    return True, f"Running: {preview}{more}"
 
 def close_app(app_name):
     app = app_name.lower().strip()
-    exe = APP_MAP.get(app, app + ".exe")
+    exe = APP_MAP.get(app) or _resolve_app_fuzzy(app) or (app + ".exe")
     killed = False
     for proc in psutil.process_iter(['name']):
         if proc.info['name'] and exe.lower() in proc.info['name'].lower():
             proc.kill()
             killed = True
-    return (True, f"Closed {app_name}") if killed else (False, f"{app_name} was not running")
+    if killed:
+        return True, f"Closed {app_name}"
+    # Nothing matched by exe-name guess — try a fuzzy match against the
+    # real list of running processes instead of just giving up.
+    return kill_process_fuzzy(app_name)
+
+# ── Window Management ─────────────────────
+def _resolve_window(title_query: str, threshold: int = 70):
+    titles = [t for t in gw.getAllTitles() if t.strip()]
+    if not titles:
+        return None
+    match = rf_process.extractOne(title_query, titles, scorer=fuzz.WRatio)
+    if not match or match[1] < threshold:
+        return None
+    wins = gw.getWindowsWithTitle(match[0])
+    return wins[0] if wins else None
+
+def list_windows():
+    titles = [t for t in gw.getAllTitles() if t.strip()]
+    if not titles:
+        return False, "No open windows found"
+    preview = ", ".join(titles[:15])
+    more = f" (+{len(titles) - 15} more)" if len(titles) > 15 else ""
+    return True, f"Open windows: {preview}{more}"
+
+def switch_to_window(title_query: str):
+    win = _resolve_window(title_query)
+    if not win:
+        return False, f"No window matching '{title_query}'"
+    try:
+        win.activate()
+        return True, f"Switched to {win.title}"
+    except Exception:
+        return False, f"Found '{win.title}' but couldn't bring it to front"
+
+def minimize_window(title_query: str):
+    win = _resolve_window(title_query)
+    if not win:
+        return False, f"No window matching '{title_query}'"
+    try:
+        win.minimize()
+        return True, f"Minimized {win.title}"
+    except Exception:
+        return False, f"Couldn't minimize '{win.title}'"
+
+def maximize_window(title_query: str):
+    win = _resolve_window(title_query)
+    if not win:
+        return False, f"No window matching '{title_query}'"
+    try:
+        win.maximize()
+        return True, f"Maximized {win.title}"
+    except Exception:
+        return False, f"Couldn't maximize '{win.title}'"
+
+def close_window(title_query: str):
+    win = _resolve_window(title_query)
+    if not win:
+        return False, f"No window matching '{title_query}'"
+    try:
+        win.close()
+        return True, f"Closed {win.title}"
+    except Exception:
+        return False, f"Couldn't close '{win.title}'"
 
 # ── Screenshot ────────────────────────────
 def take_screenshot():
@@ -205,6 +401,22 @@ def _is_explicit_pc_action(text: str, action_words: tuple, bare_phrases: set) ->
         return True
     return any(w in text for w in _PC_TARGET_WORDS)
 
+_MUTE_STATUS_PHRASES = ("is it muted", "is muted", "am i muted", "is the volume muted", "mute status")
+_VOLUME_LEVEL_PHRASES = ("what's the volume", "whats the volume", "what is the volume", "volume level", "how loud")
+
+_WINDOW_TRIGGER_PHRASES = (
+    "switch to window", "switch window to", "bring up window",
+    "minimize window", "maximize window", "close window",
+)
+
+def _extract_window_query(text: str) -> str:
+    q = text
+    for phrase in _WINDOW_TRIGGER_PHRASES:
+        q = q.replace(phrase, "")
+    for word in ("window", "switch", "minimize", "maximize", "close", "to", "the"):
+        q = q.replace(word, "")
+    return " ".join(q.split()).strip()
+
 def handle_pc_command(text) -> "FeatureResult | None":
     text = text.lower()
 
@@ -214,6 +426,12 @@ def handle_pc_command(text) -> "FeatureResult | None":
     # the PC down instead of cancelling a pending one.
     if "cancel shutdown" in text or "cancel the shutdown" in text:
         ok, msg = cancel_shutdown()
+    # Status QUERIES must be checked before the "unmute"/"mute" action
+    # branches below — "is it muted" contains "muted", which contains
+    # "mute" as a substring, so without this the mute-status question
+    # would get treated as a command to actually mute the PC.
+    elif any(p in text for p in _MUTE_STATUS_PHRASES) or any(p in text for p in _VOLUME_LEVEL_PHRASES):
+        ok, msg = get_volume_level()
     # Same substring trap for "unmute" containing "mute" — check it first.
     elif "unmute" in text:
         ok, msg = unmute_volume()
@@ -232,6 +450,39 @@ def handle_pc_command(text) -> "FeatureResult | None":
         ok, msg = brightness_up()
     elif "brightness" in text and any(w in text for w in _DOWN_WORDS):
         ok, msg = brightness_down()
+    elif "battery" in text:
+        ok, msg = get_system_status("battery")
+    elif "cpu" in text:
+        ok, msg = get_system_status("cpu")
+    elif "memory" in text:
+        ok, msg = get_system_status("memory")
+    elif "disk space" in text or "disk usage" in text or ("disk" in text and "how full" in text):
+        ok, msg = get_system_status("disk")
+    elif "system status" in text or "system info" in text:
+        ok, msg = get_system_status()
+    elif "clipboard" in text or "what did i copy" in text or "what's copied" in text or "whats copied" in text:
+        ok, msg = get_clipboard_text()
+    # Process-listing queries must be checked before the generic "open"
+    # branch further down — "what apps are open" itself contains the
+    # substring "open" and would otherwise be swallowed as an (invalid)
+    # app-launch attempt instead of answering the question.
+    elif "running processes" in text or "what's running" in text or "whats running" in text \
+            or "what apps are open" in text or "list processes" in text:
+        ok, msg = list_processes()
+    # Window-management branches require the literal word "window" AND
+    # must come before the generic "open"/"close" branches below —
+    # otherwise "close window notepad" would be swallowed by the
+    # existing bare close_app branch before ever reaching these.
+    elif "window" in text and ("switch" in text or "bring up" in text):
+        ok, msg = switch_to_window(_extract_window_query(text))
+    elif "window" in text and "minimize" in text:
+        ok, msg = minimize_window(_extract_window_query(text))
+    elif "window" in text and "maximize" in text:
+        ok, msg = maximize_window(_extract_window_query(text))
+    elif "window" in text and "close" in text:
+        ok, msg = close_window(_extract_window_query(text))
+    elif "window" in text and ("list" in text or "what windows" in text):
+        ok, msg = list_windows()
     elif _is_explicit_pc_action(text, ("shutdown", "shut down"), _BARE_SHUTDOWN_PHRASES):
         ok, msg = shutdown_pc()
     elif _is_explicit_pc_action(text, ("restart",), _BARE_RESTART_PHRASES):

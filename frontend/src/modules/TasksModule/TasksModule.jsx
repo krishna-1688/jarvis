@@ -18,16 +18,20 @@ function dueInfo(dueAt) {
 
 /**
  * Registered as `tasks`: 3x4 compact (top 5 due-soonest), 5x6 expanded
- * (all open + a done toggle + an add strip). Clicking a row completes it —
- * optimistic locally, confirmed via POST /command against the real task_complete
- * intent (features/tasks.py's fuzzy match resolves which task by title).
+ * (all open + a done toggle). The add-task input is always visible in
+ * both sizes. Clicking a row completes it — optimistic locally, confirmed
+ * via POST /command against the real task_complete intent (features/
+ * tasks.py's fuzzy match resolves which task by title).
  */
 export default function TasksModule({ w }) {
   const expanded = w >= 5;
-  const { data, error, loading: fetchLoading } = useApiData(api.tasks, { pollMs: 30000 });
+  // refreshOn: 'tasks' — the backend broadcasts data_refreshed/tasks the
+  // moment a task is added, from EITHER this module's own input below or
+  // a voice command ("remind me to..."), so a voice-added task shows up
+  // here immediately instead of waiting up to 30s for the next poll.
+  const { data, error, loading: fetchLoading } = useApiData(api.tasks, { pollMs: 30000, refreshOn: 'tasks' });
   const [completed, setCompleted] = useState(() => new Set());
   const [showDone, setShowDone] = useState(false);
-  const [adding, setAdding] = useState(false);
   const [draft, setDraft] = useState('');
   const [pendingAdd, setPendingAdd] = useState(false);
 
@@ -61,10 +65,13 @@ export default function TasksModule({ w }) {
     const text = draft.trim();
     if (!text) return;
     setDraft('');
-    setAdding(false);
     if (!USE_MOCK) {
       setPendingAdd(true);
       try {
+        // Same task_add intent a voice "remind me to..." hits — the
+        // backend broadcasts data_refreshed/tasks on success, which
+        // useApiData's refreshOn above picks up, so this list updates
+        // itself rather than needing a local optimistic insert here.
         await api.command(`remind me to ${text}`);
       } catch {
         // NoSignal/retry loop on the next poll surfaces persistent failures
@@ -78,24 +85,24 @@ export default function TasksModule({ w }) {
     <div className={`tasks-module ${expanded ? 'tasks-module--expanded' : 'tasks-module--compact'}`}>
       {expanded && (
         <div className="tasks-module__toolbar">
-          <button className="tasks-module__toolbar-btn" onClick={() => setAdding((v) => !v)}>+ ADD</button>
           <button className="tasks-module__toolbar-btn" onClick={() => setShowDone((v) => !v)}>
             {showDone ? 'HIDE DONE' : 'SHOW DONE'}
           </button>
         </div>
       )}
-      {adding && (
-        <form className="tasks-module__add-form" onSubmit={handleAddSubmit}>
-          <input
-            className="tasks-module__add-input mono"
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            placeholder="remind me to…"
-            disabled={pendingAdd}
-            autoFocus
-          />
-        </form>
-      )}
+      {/* Always visible, in both compact and expanded — previously this sat
+          behind a "+ ADD" toggle button (and only existed at all in the
+          expanded layout), so typing a task directly took an extra click
+          and wasn't even possible in the compact size. */}
+      <form className="tasks-module__add-form" onSubmit={handleAddSubmit}>
+        <input
+          className="tasks-module__add-input mono"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          placeholder="remind me to…"
+          disabled={pendingAdd}
+        />
+      </form>
       <div className="tasks-module__list">
         {shown.length === 0 && <div className="tasks-module__empty mono">- - -  NO OPEN TASKS</div>}
         {shown.map((t) => {

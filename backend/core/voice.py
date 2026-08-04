@@ -226,7 +226,14 @@ def _ensure_tts_loop():
         _tts_loop_ready.wait(timeout=5)
 
 def speak(text: str):
-    print(f"\n🤖 Jarvis: {text}")
+    # Printing is cosmetic (console log) — must never block actual audio
+    # playback. A console that can't encode a character (e.g. cp1252)
+    # would otherwise raise here and skip _tts_stream entirely, making
+    # TTS silently disappear for reasons that have nothing to do with TTS.
+    try:
+        print(f"\n🤖 Jarvis: {text}")
+    except Exception:
+        pass
     _status_clear()
 
     _ensure_tts_loop()
@@ -377,7 +384,7 @@ def is_shutdown_requested() -> bool:
 #   increments silence count in caller.
 # ══════════════════════════════════════════
 
-LISTEN_TIMEOUT    = 8
+LISTEN_TIMEOUT    = 7   # KK wants standby after exactly 7s of silence — see jarvis.py's SILENCE_LIMIT=1
 PHRASE_TIME_LIMIT = 15
 
 def _wait_for_typed_line(timeout: float = 120.0) -> str:

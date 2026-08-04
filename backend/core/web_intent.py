@@ -14,14 +14,17 @@ import json
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from groq import Groq
-from config import GROQ_API_KEY, GROQ_MODEL
+from config import GROQ_API_KEY, GROQ_CLASSIFIER_MODEL
 
-groq_client = Groq(api_key=GROQ_API_KEY)
+# max_retries=0 — see core/router.py's identical comment.
+groq_client = Groq(api_key=GROQ_API_KEY, max_retries=0, timeout=6.0)
 
 WEB_TRIGGER_WORDS = [
     "open", "go to", "search", "look up", "find", "compare",
     "summarize", "summarise", "what does this page say",
-    "what are the reviews", "browse", "google"
+    "what are the reviews", "browse", "google",
+    "click", "scroll", "close tab", "close this tab", "close the tab",
+    "go back a page", "previous page", "back a page",
 ]
 
 EXTRACTION_PROMPT = """You extract web browsing actions from natural speech for a voice assistant.
@@ -31,16 +34,23 @@ Classify the input into exactly ONE action type:
   - "search"    : search for something, optionally on a named site.  e.g. "search wireless mouse on amazon"
   - "compare"   : compare something across exactly two named sites.  e.g. "compare this laptop on amazon and flipkart"
   - "summarize" : summarize/read/explain the CURRENTLY OPEN page, no navigation involved.  e.g. "summarize this page", "what are the reviews saying"
+  - "interact"  : act on the CURRENTLY OPEN page — click a result, scroll, go back a page, or close the tab.  e.g. "click the second result", "scroll down", "go back a page", "close this tab"
   - "none"      : not a web browsing request at all.
+
+For "interact", also set interact_type to exactly one of:
+  "click_result" (needs n = the 1-indexed result number, default 1 if unspecified),
+  "scroll_down", "scroll_up", "back", "close_tab".
 
 Respond with ONLY valid JSON, no markdown, no explanation.
 
 Format:
-{"action": "open", "site": "youtube", "query": null, "site_a": null, "site_b": null}
-{"action": "search", "site": "amazon", "query": "wireless mouse", "site_a": null, "site_b": null}
-{"action": "compare", "site": null, "query": "laptop price", "site_a": "amazon", "site_b": "flipkart"}
-{"action": "summarize", "site": null, "query": null, "site_a": null, "site_b": null}
-{"action": "none", "site": null, "query": null, "site_a": null, "site_b": null}
+{"action": "open", "site": "youtube", "query": null, "site_a": null, "site_b": null, "interact_type": null, "n": null}
+{"action": "search", "site": "amazon", "query": "wireless mouse", "site_a": null, "site_b": null, "interact_type": null, "n": null}
+{"action": "compare", "site": null, "query": "laptop price", "site_a": "amazon", "site_b": "flipkart", "interact_type": null, "n": null}
+{"action": "summarize", "site": null, "query": null, "site_a": null, "site_b": null, "interact_type": null, "n": null}
+{"action": "interact", "site": null, "query": null, "site_a": null, "site_b": null, "interact_type": "click_result", "n": 2}
+{"action": "interact", "site": null, "query": null, "site_a": null, "site_b": null, "interact_type": "scroll_down", "n": null}
+{"action": "none", "site": null, "query": null, "site_a": null, "site_b": null, "interact_type": null, "n": null}
 
 Rules:
 - If a site isn't named for "search", set site to null (caller will do a general web search).
@@ -66,7 +76,7 @@ def extract_web_intent(text: str) -> dict | None:
     try:
         prompt = EXTRACTION_PROMPT.replace("{user_input}", text)
         response = groq_client.chat.completions.create(
-            model=GROQ_MODEL,
+            model=GROQ_CLASSIFIER_MODEL,
             messages=[{"role": "user", "content": prompt}],
             max_tokens=120,
             temperature=0,
@@ -82,11 +92,13 @@ def extract_web_intent(text: str) -> dict | None:
             return None
 
         return {
-            "action":  action,
-            "site":    data.get("site"),
-            "query":   data.get("query"),
-            "site_a":  data.get("site_a"),
-            "site_b":  data.get("site_b"),
+            "action":        action,
+            "site":          data.get("site"),
+            "query":         data.get("query"),
+            "site_a":        data.get("site_a"),
+            "site_b":        data.get("site_b"),
+            "interact_type": data.get("interact_type"),
+            "n":             data.get("n"),
         }
 
     except Exception as e:

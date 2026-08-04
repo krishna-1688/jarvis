@@ -67,8 +67,18 @@ from features.base import FeatureResult
 
 def _log_progress(msg: str):
     """Passed as on_progress to feature functions instead of speak() —
-    see module docstring for why TTS can't safely run in this process."""
+    see module docstring for why TTS can't safely run in this process.
+    Also broadcasts to the frontend (core.ws_hub) so a slow multi-step
+    action — a VTOP fetch, Spotify's search-and-play automation, etc. —
+    shows what's actually happening instead of just a spinner with no
+    detail. Previously this only ever printed to the server's own
+    console, which nobody but a developer would ever see."""
     print(f"  [progress] {msg}")
+    try:
+        from core.ws_hub import broadcast
+        broadcast({"type": "progress", "text": msg})
+    except Exception:
+        pass
 
 
 # ══════════════════════════════════════════
@@ -76,15 +86,26 @@ def _log_progress(msg: str):
 # ══════════════════════════════════════════
 
 def handle_vtop_fetch(user_input: str, payload: dict) -> FeatureResult:
-    """Explicit 'refresh/sync marks from VTOP' request. payload = marks intent dict."""
+    """
+    Explicit 'refresh/sync marks from VTOP' request. The router no
+    longer pre-builds the marks-intent dict itself (see core/router.py's
+    module docstring) — extract_marks_intent's own keyword-based
+    subject/assessment/semester parsing is a narrower, lower-risk
+    decision than top-level classification, so it stays as-is, just
+    called from here instead of from the old Stage 1.
+    """
     from features.vtop import refresh_marks_result
-    return refresh_marks_result(payload, on_progress=_log_progress)
+    from core.router import extract_marks_intent
+    intent = extract_marks_intent(user_input)
+    return refresh_marks_result(intent, on_progress=_log_progress)
 
 
 def handle_marks(user_input: str, payload: dict) -> FeatureResult:
-    """Offline marks lookup. payload = marks intent dict."""
+    """Offline marks lookup — see handle_vtop_fetch's comment."""
     from features.vtop import get_marks_result
-    return get_marks_result(user_input, payload, on_progress=_log_progress)
+    from core.router import extract_marks_intent
+    intent = extract_marks_intent(user_input)
+    return get_marks_result(user_input, intent, on_progress=_log_progress)
 
 
 def handle_attendance(user_input: str, payload: dict) -> FeatureResult:
@@ -205,10 +226,20 @@ def handle_spotify(user_input: str, payload: dict) -> FeatureResult:
     action = (payload or {}).get("action", "")
     query = (payload or {}).get("query", "")
 
+    # Both the Stage-1 regex and Stage-2 Groq classifier extract this raw
+    # query fairly naively — "play X song in spotify" or "put on some X"
+    # leak filler words straight into the search. One small, fast Groq
+    # call here (core/spotify_intent.py) cleans it up regardless of which
+    # path produced it, rather than trying to special-case every possible
+    # phrasing with more regex.
+    if action in ("play", "open") and query.strip():
+        from core.spotify_intent import clean_song_query
+        query = clean_song_query(query)
+
     if action == "play":
-        return spotify.play_song(query)
+        return spotify.play_song(query, on_progress=_log_progress)
     if action == "open":
-        return spotify.open_and_play(query)
+        return spotify.open_and_play(query, on_progress=_log_progress)
     if action == "pause":
         return spotify.pause_playback()
     if action == "resume":
@@ -232,9 +263,23 @@ def handle_spotify(user_input: str, payload: dict) -> FeatureResult:
 #   TASK HANDLERS
 # ══════════════════════════════════════════
 
+def _broadcast_tasks_changed():
+    """Lets the frontend's TasksModule refetch immediately instead of
+    waiting up to 30s for its next poll — see useApiData's refreshOn.
+    Matters most for voice: 'remind me to X' used to only show up in the
+    Tasks module whenever it next happened to poll."""
+    try:
+        from core.ws_hub import broadcast
+        broadcast({"type": "data_refreshed", "data_type": "tasks"})
+    except Exception:
+        pass
+
 def handle_task_add(user_input: str, payload: dict) -> FeatureResult:
     from features.tasks import get_task_add_result
-    return get_task_add_result(user_input, entities=payload, on_progress=_log_progress)
+    result = get_task_add_result(user_input, entities=payload, on_progress=_log_progress)
+    if result.ok:
+        _broadcast_tasks_changed()
+    return result
 
 def handle_task_list(user_input: str, payload: dict) -> FeatureResult:
     from features.tasks import get_task_list_result
@@ -246,11 +291,17 @@ def handle_task_today(user_input: str, payload: dict) -> FeatureResult:
 
 def handle_task_complete(user_input: str, payload: dict) -> FeatureResult:
     from features.tasks import get_task_complete_result
-    return get_task_complete_result(user_input, entities=payload, on_progress=_log_progress)
+    result = get_task_complete_result(user_input, entities=payload, on_progress=_log_progress)
+    if result.ok:
+        _broadcast_tasks_changed()
+    return result
 
 def handle_task_drop(user_input: str, payload: dict) -> FeatureResult:
     from features.tasks import get_task_drop_result
-    return get_task_drop_result(user_input, entities=payload, on_progress=_log_progress)
+    result = get_task_drop_result(user_input, entities=payload, on_progress=_log_progress)
+    if result.ok:
+        _broadcast_tasks_changed()
+    return result
 
 
 # ══════════════════════════════════════════
@@ -378,22 +429,42 @@ def handle_alias_merchant(user_input: str, payload: dict) -> FeatureResult:
 #   PC HANDLER
 # ══════════════════════════════════════════
 
-def handle_pc(user_input: str, payload) -> FeatureResult:
-    """payload is already a FeatureResult — handle_pc_command built it in router.py."""
-    return payload
+def handle_pc(user_input: str, payload: dict) -> FeatureResult | None:
+    """
+    payload is now just Groq's (usually empty) entities dict — the
+    router no longer pre-parses PC commands itself (see core/router.py's
+    module docstring on the Stage-1 minimization). handle_pc_command
+    does its own internal keyword dispatch (volume vs mute vs open app
+    vs window management etc.) using the raw text — that's a narrower,
+    lower-collision-risk decision than top-level intent classification
+    since we already know it's a PC-domain request by the time we're
+    here, so it stays as-is rather than moving to Groq too.
+
+    Returns None (not a FeatureResult) when handle_pc_command finds
+    nothing to do — same "not actually my domain" convention handle_web/
+    handle_whatsapp already use, so process() falls back to plain chat
+    instead of a canned PC-flavored error. This matters concretely: the
+    router's safety net demotes a misclassified system_shutdown to "pc"
+    when "jarvis" isn't mentioned (e.g. "let's restart the conversation"
+    briefly got misread as a shutdown intent) — that demotion is meant
+    to land somewhere harmless, not force a "not sure what you want done
+    on the PC" reply onto an utterance that was never about the PC at all.
+    """
+    from features.pc_control import handle_pc_command
+    return handle_pc_command(user_input)
 
 
 # ══════════════════════════════════════════
 #   LMS HANDLER
 # ══════════════════════════════════════════
 
-def handle_lms(user_input: str, payload: str) -> FeatureResult:
-    """
-    Handles all LMS/assignment queries.
-    payload (query_type): 'assignments' | 'sync'
-    """
+def handle_lms_assignments(user_input: str, payload: dict) -> FeatureResult:
     from features.lms import get_lms_result
-    return get_lms_result(payload, on_progress=_log_progress)
+    return get_lms_result("assignments", on_progress=_log_progress)
+
+def handle_lms_sync(user_input: str, payload: dict) -> FeatureResult:
+    from features.lms import get_lms_result
+    return get_lms_result("sync", on_progress=_log_progress)
 
 
 # ══════════════════════════════════════════
@@ -518,7 +589,12 @@ def handle_whatsapp(user_input: str, payload: dict) -> FeatureResult | None:
     )
     from core.whatsapp_intent import extract_whatsapp_intent_groq
 
-    raw_text  = payload.get("raw_text", "")
+    # payload.raw_text was set by the old Stage-1 keyword pre-filter;
+    # Groq's main classifier now sends {} for this intent (see
+    # core/router.py's entity guidance) since this handler does its own
+    # dedicated extraction anyway — user_input is the real source now,
+    # payload.raw_text kept only in case something upstream still sets it.
+    raw_text  = payload.get("raw_text") or user_input
     extracted = extract_whatsapp_intent_groq(raw_text)
 
     if not extracted:
@@ -608,11 +684,14 @@ def handle_web(user_input: str, payload: dict) -> FeatureResult | None:
     docstring for why that matters."""
     from features.web_control import (
         open_site, search_on_site, general_web_search,
-        get_page_text, compare_across_sites
+        get_page_text, compare_across_sites,
+        click_result, scroll_page, go_back, close_current_tab,
     )
     from core.web_intent import extract_web_intent
 
-    raw_text  = payload.get("raw_text", "")
+    # See handle_whatsapp's identical comment — payload is now typically
+    # {} for this intent, user_input is the real source.
+    raw_text  = payload.get("raw_text") or user_input
     extracted = extract_web_intent(raw_text)
 
     if not extracted:
@@ -682,6 +761,35 @@ def handle_web(user_input: str, payload: dict) -> FeatureResult | None:
             display=msg, spoken=summary,
         )
 
+    if action == "interact":
+        interact_type = extracted.get("interact_type")
+        n = extracted.get("n") or 1
+
+        if interact_type == "click_result":
+            result = click_result(int(n))
+            ok_msg, fail_msg = f"Clicked result {n}", "Couldn't click that result"
+        elif interact_type == "scroll_down":
+            result = scroll_page("down")
+            ok_msg, fail_msg = "Scrolled down", "Couldn't scroll"
+        elif interact_type == "scroll_up":
+            result = scroll_page("up")
+            ok_msg, fail_msg = "Scrolled up", "Couldn't scroll"
+        elif interact_type == "back":
+            result = go_back()
+            ok_msg, fail_msg = "Went back a page", "Couldn't go back"
+        elif interact_type == "close_tab":
+            result = close_current_tab()
+            ok_msg, fail_msg = "Closed the tab", "Couldn't close the tab"
+        else:
+            msg = "Not sure what to do on the page — try 'click the second result', 'scroll down', 'go back a page', or 'close this tab'."
+            return FeatureResult(ok=False, data={}, display=msg, spoken=msg, error="unknown_interact_type")
+
+        if result.ok:
+            return FeatureResult(ok=True, data=result.data, display=f"✅ {ok_msg}", spoken=ok_msg)
+        err = result.error or "unknown error"
+        msg = f"❌ {fail_msg} — {err}"
+        return FeatureResult(ok=False, data={}, display=msg, spoken=f"{fail_msg} — {err}", error=err)
+
     msg = "I'm not sure how to do that on the web yet."
     return FeatureResult(ok=False, data={}, display=msg, spoken=msg, error="unknown_action")
 
@@ -699,7 +807,8 @@ INTENT_HANDLERS = {
     "vtop_fetch_marks":   handle_vtop_fetch,
     "whatsapp":           handle_whatsapp,
     "web":                handle_web,
-    "lms":                handle_lms,
+    "lms_assignments":    handle_lms_assignments,
+    "lms_sync":           handle_lms_sync,
     "attendance":         handle_attendance,
     "bunk_check":         handle_bunk_check,
     "alias_add":          handle_alias_add,
@@ -788,8 +897,8 @@ def process(user_input: str) -> dict:
         result = FeatureResult(ok=True, data={}, display=reply, spoken=reply)
 
     # H.3: record this turn for cross-turn follow-up inheritance (see
-    # core/context.py) — entities only when payload is actually a dict
-    # ("pc"'s payload is already a built FeatureResult, not entities).
+    # core/context.py) — payload is always a dict now (Groq's entities,
+    # usually {}), but the isinstance guard stays cheap insurance.
     from core.context import record_turn
     record_turn(user_input, category, payload if isinstance(payload, dict) else {}, result.display)
 
@@ -1104,6 +1213,11 @@ def _on_startup():
 @app.on_event("shutdown")
 def _on_shutdown():
     _shutdown.set()
+    try:
+        from features.web_control import save_browser_session
+        save_browser_session()
+    except Exception:
+        pass
 
 
 @app.post("/command", response_model=CommandResponse)
@@ -1112,6 +1226,8 @@ def command(req: CommandRequest):
         result = process(req.text)
         return CommandResponse(**result)
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         msg = f"Something broke handling that — {e}"
         return CommandResponse(ok=False, display=msg, spoken=msg, data={}, error=str(e))
 

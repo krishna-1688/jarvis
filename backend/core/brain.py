@@ -14,9 +14,14 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from groq import Groq
-from config import GROQ_API_KEY, GROQ_MODEL
+from config import GROQ_API_KEY, GROQ_MODEL, GROQ_CLASSIFIER_MODEL
 
-groq_client = Groq(api_key=GROQ_API_KEY)
+# max_retries=0, timeout=8 — the SDK's default (2 retries, exponential
+# backoff) turned a single rate-limited call into a 20+ second hang,
+# confirmed live. ask_groq's own try/except (below) now gives a graceful
+# spoken fallback instead of letting a failure bubble up as a raw error,
+# so failing in ~8s is strictly better than silently retrying for 20+.
+groq_client = Groq(api_key=GROQ_API_KEY, max_retries=0, timeout=8.0)
 
 # ── System Prompt ──────────────────────────────────────
 SYSTEM_PROMPT = """You are Jarvis, the personal AI assistant of Krishna Kumar (KK).
@@ -68,6 +73,14 @@ suggestion):
 - Generic knowledge (how VIT's grading scale works, what a CAT is, study
   advice) is fine — the line is specific facts about KK's own records.
 
+HOW TO ANSWER (H.7 — do this before every reply, silently, don't show your work):
+1. Identify the literal question(s) KK actually asked — not what's adjacent to it, not what you assume he'd also want.
+2. If he asked more than one thing in the same message, answer each part — don't drop one to keep it short.
+3. Check what you actually have: an injected STUDENT DATA block, a Context block above, or nothing. Answer from THAT only — never from what "usually" is true or what was said in an earlier, unrelated conversation.
+4. The most recent message is authoritative. Only pull in earlier turns if this one is clearly a follow-up to them ("what about tomorrow", "same for DBMS") — if it stands on its own, treat it on its own, even if the topic just changed.
+5. Write ONLY the answer to what was asked — no unrelated facts, no unrequested advice, no restating the question back, no tangent into a nearby topic just because it's related.
+6. Before it goes out, check the reply against the actual question one more time — if a sentence doesn't answer what KK asked, cut it rather than leave it in for flavor.
+
 WHEN SOMETHING GOES WRONG OR IS AMBIGUOUS (H.5):
 - Acknowledge the hiccup in passing, then keep moving — never dwell on
   an error or apologize more than once for the same thing
@@ -100,34 +113,6 @@ MAX_HISTORY_TURNS     = 6   # 6 exchanges = 12 messages
 
 
 # ══════════════════════════════════════════════════════════
-#   GROQ INTENT CLASSIFIER
-# ══════════════════════════════════════════════════════════
-
-def classify_intent(user_input: str) -> str:
-    """
-    Used as fallback when keyword router is unsure.
-    One tiny Groq call, 10 tokens max.
-    """
-    try:
-        r = groq_client.chat.completions.create(
-            model=GROQ_MODEL,
-            messages=[{
-                "role": "user",
-                "content": (
-                    "Classify into exactly one word: marks, attendance, timetable, exam, grades, general\n"
-                    f"Query: {user_input}"
-                )
-            }],
-            max_tokens=5,
-            temperature=0
-        )
-        result = r.choices[0].message.content.strip().lower()
-        return result if result in {"marks","attendance","timetable","exam","grades","general"} else "general"
-    except Exception:
-        return "general"
-
-
-# ══════════════════════════════════════════════════════════
 #   GROQ MARKS INTENT EXTRACTOR
 # ══════════════════════════════════════════════════════════
 
@@ -144,7 +129,7 @@ def extract_marks_intent_groq(user_input: str) -> dict:
 
     try:
         r = groq_client.chat.completions.create(
-            model=GROQ_MODEL,
+            model=GROQ_CLASSIFIER_MODEL,
             messages=[{
                 "role": "user",
                 "content": (
@@ -277,14 +262,28 @@ def ask_groq(user_input: str, extra_context: str = "", max_tokens_override: int 
     messages += trimmed
     messages.append({"role": "user", "content": user_input})
 
+    # Lowered from 0.7 — that much randomness was contributing to
+    # off-topic drift (a witty aside is fine, but 0.7 sometimes chased a
+    # tangent instead of just answering). 0.5 keeps enough variance for
+    # personality without sampling away from the actual question.
     max_tok = max_tokens_override if max_tokens_override else 250
-    response = groq_client.chat.completions.create(
-        model=GROQ_MODEL,
-        messages=messages,
-        max_tokens=max_tok,
-        temperature=0.7
-    )
-    reply = response.choices[0].message.content.strip()
+    try:
+        response = groq_client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=messages,
+            max_tokens=max_tok,
+            temperature=0.5
+        )
+        reply = response.choices[0].message.content.strip()
+    except Exception as e:
+        # groq_client has max_retries=0/timeout=8 (see its own comment) —
+        # this fires fast on a rate limit or network hiccup rather than
+        # after the SDK's default silent retry-for-20-seconds. Previously
+        # this had no try/except at all, so a failure here bubbled all the
+        # way up to server.py's generic "Something broke handling that —
+        # <raw error>" instead of a normal-sounding reply.
+        print(f"[brain] ask_groq call failed: {e}")
+        reply = "Give me a sec, boss — having trouble thinking straight right now."
 
     # Save to history
     conversation_history.append({"role": "user",      "content": user_input})
