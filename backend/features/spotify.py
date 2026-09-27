@@ -369,6 +369,7 @@ def _find_play_button(hwnd, timeout: float = 5.0):
 
 
 def _read_search_box_text(hwnd) -> str:
+    _ensure_com()
     from pywinauto import Application
     app = Application(backend='uia').connect(handle=hwnd)
     win = app.window(handle=hwnd)

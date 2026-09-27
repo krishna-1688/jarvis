@@ -14,19 +14,27 @@ Go to the individual package's documentation for more details.
 
 """
 
-from . import session_generator
-from . import student_profile
-from . import student_timetable
-from . import student_academic_history
-from . import faculty_handler
-from . import academic_calender_handler
-from . import student_exam_schedule
+# Lazy exports (PEP 562). Importing this package used to import every
+# handler up front, which pulls in pandas + BeautifulSoup (~45 MB) — even
+# when a caller only wanted `vtop_handler.constants`. The backend keeps
+# running all day but only scrapes VTOP a few times, so these now load on
+# first use.
+import importlib
 
-from .session_generator import get_valid_session, generate_session
-from .student_profile import get_student_profile
-from .student_timetable import get_timetable
-from .student_attendance import get_attendance, get_single_subject_attendance
-from .student_academic_history import get_acadhistory
-from .faculty_handler import get_faculty_details
-from .academic_calender_handler import get_academic_calender
-from .student_exam_schedule import get_exam_schedule
+_EXPORTS = {
+    "get_valid_session": "session_generator", "generate_session": "session_generator",
+    "get_student_profile": "student_profile", "get_timetable": "student_timetable",
+    "get_attendance": "student_attendance", "get_single_subject_attendance": "student_attendance",
+    "get_acadhistory": "student_academic_history", "get_faculty_details": "faculty_handler",
+    "get_academic_calender": "academic_calender_handler", "get_exam_schedule": "student_exam_schedule",
+}
+_SUBMODULES = {"session_generator", "student_profile", "student_timetable", "student_academic_history",
+               "faculty_handler", "academic_calender_handler", "student_exam_schedule", "student_attendance"}
+
+
+def __getattr__(name):
+    if name in _EXPORTS:
+        return getattr(importlib.import_module(f".{_EXPORTS[name]}", __name__), name)
+    if name in _SUBMODULES:
+        return importlib.import_module(f".{name}", __name__)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

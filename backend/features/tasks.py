@@ -106,7 +106,7 @@ def add(raw_text: str, on_progress=None) -> FeatureResult:
     suffix = f" ({', '.join(bits)})" if bits else ""
 
     msg = f"Added: {title}{suffix}"
-    return FeatureResult(ok=True, data={"task": task}, display=msg, spoken=f"Added. {', '.join(bits) or 'No due date set'}.")
+    return FeatureResult(ok=True, data={"task": task}, display=msg, spoken=f"Added {title}{(', ' + ', '.join(bits)) if bits else ', no due date'}.")
 
 
 def _render_list(tasks: list) -> str:
@@ -197,6 +197,17 @@ def drop_by_query(query: str, on_progress=None) -> FeatureResult:
 # ══════════════════════════════════════════
 
 def get_task_add_result(user_input: str, entities: dict = None, on_progress=None) -> FeatureResult:
+    entities = entities or {}
+    if entities.get("note") == "call":
+        result = add(entities["raw_text"], on_progress=on_progress)
+        if result.ok:
+            result.spoken = "I can't place calls, so I've set a reminder instead. " + result.spoken
+            result.display = "I can't place calls, so I've set a reminder instead.\n" + result.display
+        return result
+    return _get_task_add_result(user_input, entities, on_progress)
+
+
+def _get_task_add_result(user_input: str, entities: dict = None, on_progress=None) -> FeatureResult:
     raw_text = (entities or {}).get("raw_text") or user_input
     return add(raw_text, on_progress=on_progress)
 

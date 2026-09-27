@@ -25,8 +25,10 @@ Design choices:
 import os
 import sys
 import re
+import functools
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -40,7 +42,7 @@ from features.base import FeatureResult
 # Reused across calls so we don't relaunch Chrome (slow, looks broken)
 # every single time the user asks for something on the web.
 
-_pw_lock      = threading.Lock()
+_pw_lock      = threading.RLock()
 _playwright   = None
 _browser      = None
 _context      = None
@@ -52,6 +54,56 @@ _current_page = None
 _SESSION_STATE_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "browser_state.json"
 )
+
+
+# ── One browser thread ─────────────────────────
+# Playwright's sync API is bound to the thread that started it, but
+# FastAPI serves requests from a pool of threads — so the second web
+# command could land on a different thread and fail with a greenlet
+# "cannot switch to a different thread" error. Every public function
+# below runs on this single dedicated thread instead.
+#
+# The same thread closes Chrome after IDLE_CLOSE_S without use, so a
+# browser opened once doesn't sit in RAM (hundreds of MB) all day.
+IDLE_CLOSE_S = 180
+_browser_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="jarvis-browser")
+_last_used = 0.0
+_idle_timer = None
+
+
+def _on_browser_thread(fn):
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        if threading.current_thread().name.startswith("jarvis-browser"):
+            return fn(*args, **kwargs)
+        global _last_used
+        _last_used = time.time()
+        try:
+            return _browser_executor.submit(fn, *args, **kwargs).result(timeout=180)
+        finally:
+            _last_used = time.time()
+            _arm_idle_close()
+    return wrapper
+
+
+def _arm_idle_close():
+    global _idle_timer
+    if _idle_timer is not None:
+        _idle_timer.cancel()
+    _idle_timer = threading.Timer(IDLE_CLOSE_S + 1, lambda: _browser_executor.submit(_close_if_idle))
+    _idle_timer.daemon = True
+    _idle_timer.start()
+
+
+def _close_if_idle():
+    if _browser is None or time.time() - _last_used < IDLE_CLOSE_S:
+        return
+    print("[web_control] browser idle — closing it to free memory")
+    try:
+        save_browser_session()
+    finally:
+        with _pw_lock:
+            _close_browser_unsafe()
 
 
 def _ensure_browser():
@@ -96,6 +148,7 @@ def _close_browser_unsafe():
     _current_page = None
 
 
+@_on_browser_thread
 def save_browser_session() -> None:
     """Persists cookies/localStorage to disk so logged-in sessions survive
     a backend restart. Call before closing the browser, not after — the
@@ -110,6 +163,7 @@ def save_browser_session() -> None:
             print(f"[web_control] failed to save session state: {e}")
 
 
+@_on_browser_thread
 def close_browser():
     """Public — call this if KK says 'close the browser' or on Jarvis shutdown."""
     save_browser_session()
@@ -217,6 +271,7 @@ def _normalize_url(text: str) -> str:
 #   1. OPEN AND NAVIGATE
 # ══════════════════════════════════════════
 
+@_on_browser_thread
 def open_site(site_name: str) -> FeatureResult:
     """
     "open youtube", "go to amazon", "open vtop"
@@ -244,6 +299,7 @@ def open_site(site_name: str) -> FeatureResult:
 #   2. SEARCH ON A SITE
 # ══════════════════════════════════════════
 
+@_on_browser_thread
 def search_on_site(site_name: str, query: str) -> FeatureResult:
     """
     "search flights to Goa on Skyscanner", "search wireless mouse on amazon"
@@ -297,6 +353,7 @@ def search_on_site(site_name: str, query: str) -> FeatureResult:
 #   3. GENERAL WEB SEARCH (visible Google)
 # ══════════════════════════════════════════
 
+@_on_browser_thread
 def general_web_search(query: str) -> FeatureResult:
     """
     Plain Google search, done visibly in the browser window.
@@ -318,6 +375,7 @@ def general_web_search(query: str) -> FeatureResult:
 #   4. SUMMARIZE / READ CURRENT PAGE
 # ══════════════════════════════════════════
 
+@_on_browser_thread
 def get_page_text(max_chars: int = 6000) -> FeatureResult:
     """
     Extracts visible text from the CURRENT page (whatever Jarvis last
@@ -354,6 +412,7 @@ def get_page_text(max_chars: int = 6000) -> FeatureResult:
 #   5. COMPARE ACROSS TWO SITES
 # ══════════════════════════════════════════
 
+@_on_browser_thread
 def compare_across_sites(query: str, site_a: str, site_b: str) -> FeatureResult:
     """
     "compare this laptop on amazon and flipkart"
@@ -417,6 +476,7 @@ def compare_across_sites(query: str, site_a: str, site_b: str) -> FeatureResult:
 # — click a result, scroll, go back, or close the tab. These make the
 # browser feel steerable rather than one-shot.
 
+@_on_browser_thread
 def click_result(n: int) -> FeatureResult:
     """Clicks the Nth link on the current page (1-indexed, matching how
     people say 'click the second one')."""
@@ -429,6 +489,7 @@ def click_result(n: int) -> FeatureResult:
         return FeatureResult(ok=False, data={}, display="", spoken="", error=str(e))
 
 
+@_on_browser_thread
 def scroll_page(direction: str = "down") -> FeatureResult:
     page = _get_page()
     try:
@@ -439,6 +500,7 @@ def scroll_page(direction: str = "down") -> FeatureResult:
         return FeatureResult(ok=False, data={}, display="", spoken="", error=str(e))
 
 
+@_on_browser_thread
 def go_back() -> FeatureResult:
     page = _get_page()
     try:
@@ -448,6 +510,7 @@ def go_back() -> FeatureResult:
         return FeatureResult(ok=False, data={}, display="", spoken="", error=str(e))
 
 
+@_on_browser_thread
 def close_current_tab() -> FeatureResult:
     """Closes the active tab. Falls back to the browser's remaining last
     tab, or a fresh blank one if that was the only tab open, so there's
@@ -472,6 +535,7 @@ def close_current_tab() -> FeatureResult:
 #   STATUS / CLEANUP HELPERS
 # ══════════════════════════════════════════
 
+@_on_browser_thread
 def is_browser_open() -> bool:
     with _pw_lock:
         if _browser is None:
@@ -483,6 +547,7 @@ def is_browser_open() -> bool:
             return False
 
 
+@_on_browser_thread
 def get_current_url() -> str | None:
     if not is_browser_open():
         return None

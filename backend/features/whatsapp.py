@@ -14,7 +14,7 @@ import requests
 
 from features.base import FeatureResult
 
-WHATSAPP_SERVICE_URL = "http://localhost:4500"
+WHATSAPP_SERVICE_URL = "http://127.0.0.1:4500"  # not "localhost" — see core/voice_bridge.py
 TIMEOUT = 10
 
 

@@ -24,14 +24,7 @@ import os
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from groq import Groq
-from config import GROQ_API_KEY, GROQ_CLASSIFIER_MODEL
-
-# max_retries=0 — see core/router.py's identical comment. clean_song_query
-# already falls back to the raw query on any failure, so a fast failure
-# beats the SDK's default 2-retry exponential backoff (confirmed to add
-# 20+ seconds on a rate limit).
-groq_client = Groq(api_key=GROQ_API_KEY, max_retries=0, timeout=6.0)
+from core.llm import complete
 
 EXTRACTION_PROMPT = """Someone asked a voice assistant to play a song on Spotify. Extract ONLY the song name (and artist, if one was named), stripping filler words like "song", "track", "some", "please", "for me", "can you", "in/on spotify", "in the background", etc.
 
@@ -68,13 +61,9 @@ def clean_song_query(raw_query: str) -> str:
 
     try:
         prompt = EXTRACTION_PROMPT.replace("{raw_query}", raw_query)
-        response = groq_client.chat.completions.create(
-            model=GROQ_CLASSIFIER_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=40,
-            temperature=0,
-        )
-        cleaned = response.choices[0].message.content.strip().strip('"').strip("'")
+        cleaned = complete([{"role": "user", "content": prompt}], role="classifier",
+                           max_tokens=40, temperature=0)
+        cleaned = cleaned.splitlines()[0].strip().strip('"').strip("'")
         return cleaned if cleaned else raw_query
     except Exception as e:
         print(f"[spotify_intent] query cleanup error: {e}")

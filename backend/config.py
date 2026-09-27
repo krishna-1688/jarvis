@@ -32,15 +32,27 @@ SPOTIFY_REDIRECT_URI = os.getenv("SPOTIFY_REDIRECT_URI", "http://127.0.0.1:8888/
 PORCUPINE_API_KEY = os.getenv("PORCUPINE_API_KEY")
 
 # ── AI Models ────────────────────────────
-GROQ_MODEL = "llama-3.3-70b-versatile"
-# Used for classification/extraction (intent routing, entity parsing,
-# song-query cleanup) — structured small-output tasks where an 8B model
-# is just as accurate as the 70B one but measurably faster on Groq's
-# hardware (confirmed live: ~0.12s vs ~0.29s avg per call on a tiny
-# prompt, and the gap widens further on the larger classification
-# prompt). GROQ_MODEL stays reserved for brain.py's actual conversational
-# replies, where response quality benefits from the bigger model.
-GROQ_CLASSIFIER_MODEL = "llama-3.1-8b-instant"
+# Ordered fallback chains, each overridable from .env as a comma list.
+# core/llm.py tries them in order and skips any model that is rate
+# limited or retired. That matters: Groq retired llama-3.1-8b-instant and
+# llama-3.3-70b-versatile for this key, and because each call site had one
+# hard-coded model, every classification/extraction call was failing
+# silently and dropping into generic chat. Each Groq model also has its
+# own per-minute token bucket, so spreading roles across models keeps us
+# further from 429s.
+def _model_list(env_name: str, default: str) -> list:
+    return [m.strip() for m in os.getenv(env_name, default).split(",") if m.strip()]
+
+# Conversational replies — quality matters most.
+CHAT_MODELS = _model_list("GROQ_CHAT_MODELS", "openai/gpt-oss-120b,qwen/qwen3.8-27b,openai/gpt-oss-20b")
+# Intent routing / entity extraction — short JSON output, latency matters.
+CLASSIFIER_MODELS = _model_list("GROQ_CLASSIFIER_MODELS", "qwen/qwen3.8-27b,openai/gpt-oss-20b,openai/gpt-oss-120b")
+# VTOP captcha reading (needs image input).
+VISION_MODELS = _model_list("GROQ_VISION_MODELS", "qwen/qwen3.8-27b")
+
+# Back-compat names for any code still reading a single model.
+GROQ_MODEL = CHAT_MODELS[0]
+GROQ_CLASSIFIER_MODEL = CLASSIFIER_MODELS[0]
 GEMINI_MODEL = "gemini-1.5-flash"
 WHISPER_MODEL = "whisper-large-v3"
 

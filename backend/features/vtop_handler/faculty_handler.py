@@ -39,7 +39,8 @@ async def get_faculty_details()-> Union[List[Dict[str, str]], None]:
 
     """
     faculty_details = None
-    async with aiohttp.ClientSession() as sess:
+    from .tls import vtop_client_session
+    async with vtop_client_session() as sess:
         async with sess.get(url=VTOP_FACULTY_URL) as resp:
             faculty_html =  await resp.text()
             faculty_details = parse_faculty_details(faculty_html)

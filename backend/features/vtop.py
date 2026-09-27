@@ -18,20 +18,47 @@ VTOP Integration for Jarvis
 import os
 import sys
 import math
+import re
 import asyncio
 import threading
-import aiohttp
+import time
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import VTOP_USERNAME, VTOP_PASSWORD
 
-from features.vtop_handler.session_generator import get_valid_session
-from features.vtop_handler.student_timetable import get_timetable
-from features.vtop_handler.student_exam_schedule import get_exam_schedule
-from features.vtop_handler.student_academic_history import get_acadhistory
-from features.vtop_handler.student_attendance import get_attendance
-from features.vtop_handler.marks_view import get_marks_dict
 from features.vtop_handler.constants import SEM_IDS, CURRENT_SEM
+
+
+# The scrapers (aiohttp, BeautifulSoup, pandas: ~60 MB together) only run
+# during a VTOP sync, a few times a day. These thin wrappers import them on
+# first use so the always-on backend doesn't carry them while idle.
+def vtop_client_session(**kwargs):
+    from features.vtop_handler.tls import vtop_client_session as f
+    return f(**kwargs)
+
+def get_valid_session(*args, **kwargs):
+    from features.vtop_handler.session_generator import get_valid_session as f
+    return f(*args, **kwargs)
+
+def get_timetable(*args, **kwargs):
+    from features.vtop_handler.student_timetable import get_timetable as f
+    return f(*args, **kwargs)
+
+def get_exam_schedule(*args, **kwargs):
+    from features.vtop_handler.student_exam_schedule import get_exam_schedule as f
+    return f(*args, **kwargs)
+
+def get_acadhistory(*args, **kwargs):
+    from features.vtop_handler.student_academic_history import get_acadhistory as f
+    return f(*args, **kwargs)
+
+def get_attendance(*args, **kwargs):
+    from features.vtop_handler.student_attendance import get_attendance as f
+    return f(*args, **kwargs)
+
+def get_marks_dict(*args, **kwargs):
+    from features.vtop_handler.marks_view import get_marks_dict as f
+    return f(*args, **kwargs)
 
 from features.base import FeatureResult
 
@@ -55,11 +82,22 @@ def _wants_force_refresh(user_input: str) -> bool:
 
 _refresh_in_flight = set()  # data_type strings currently being background-refreshed
 
+# Minimum gap between background refresh attempts for one data type.
+# De-duping in-flight runs wasn't enough: while VTOP was failing, every
+# widget poll (3 widgets x once a minute) started a fresh login + captcha
+# solve as soon as the previous attempt gave up.
+_BACKGROUND_REFRESH_MIN_GAP_S = 15 * 60
+_last_refresh_attempt = {}
+
 def _background_refresh(data_type: str, fetch_fn):
-    """Fire-and-forget refetch — de-duped so repeated stale queries within
-    the same refresh window don't pile up redundant VTOP logins."""
+    """Fire-and-forget refetch — de-duped and rate limited so repeated
+    stale queries don't pile up redundant VTOP logins."""
+    now = time.time()
     if data_type in _refresh_in_flight:
         return
+    if now - _last_refresh_attempt.get(data_type, 0) < _BACKGROUND_REFRESH_MIN_GAP_S:
+        return
+    _last_refresh_attempt[data_type] = now
     _refresh_in_flight.add(data_type)
 
     def _run():
@@ -143,7 +181,23 @@ def _run_coro(coro, timeout=120):
     return future.result(timeout=timeout)
 
 
+# After VTOP refuses a login twice in a row, don't try again for a bit —
+# otherwise every request that finds an empty cache starts another
+# (slow, captcha-solving) login that is almost certain to fail too.
+_LOGIN_FAILURE_COOLDOWN_S = 120
+_last_login_failure_at = 0.0
+
 def _run_async_with_retry(fetch_fn) -> dict:
+    global _last_login_failure_at
+    if time.time() - _last_login_failure_at < _LOGIN_FAILURE_COOLDOWN_S:
+        return {"error": "Session expired, couldn't re-login"}
+    result = _run_async_with_retry_once(fetch_fn)
+    if result.get("error") == "Session expired, couldn't re-login":
+        _last_login_failure_at = time.time()
+    return result
+
+
+def _run_async_with_retry_once(fetch_fn) -> dict:
     """
     Runs an async fetch closure. If VTOP login itself fails (csrf_token
     came back empty) or an unexpected exception is raised, retries the
@@ -195,7 +249,7 @@ def fetch_vtop_all_sems() -> dict:
     from core.memory import get_marks_synced_sems
 
     async def _fetch():
-        async with aiohttp.ClientSession() as sess:
+        async with vtop_client_session() as sess:
             username, csrf_token = await _login(sess)
             if not csrf_token:
                 return {"error": "Login failed"}
@@ -221,7 +275,7 @@ def fetch_vtop_all_sems() -> dict:
 def fetch_vtop_sem(sem_id: str) -> dict:
     """Fetch and save marks for one specific semester. Used by daily sync."""
     async def _fetch():
-        async with aiohttp.ClientSession() as sess:
+        async with vtop_client_session() as sess:
             username, csrf_token = await _login(sess)
             if not csrf_token:
                 return {"error": "Login failed"}
@@ -234,7 +288,7 @@ def fetch_vtop_sem(sem_id: str) -> dict:
 def fetch_attendance() -> dict:
     """Fetch current-semester attendance and save to SQLite. Same retry-once pattern as marks."""
     async def _fetch():
-        async with aiohttp.ClientSession() as sess:
+        async with vtop_client_session() as sess:
             username, csrf_token = await _login(sess)
             if not csrf_token:
                 return {"error": "Login failed"}
@@ -261,7 +315,7 @@ def fetch_attendance_for_sem(sem_id: str) -> dict:
     fetch-everything-once pass (fetch_attendance_all_sems).
     """
     async def _fetch():
-        async with aiohttp.ClientSession() as sess:
+        async with vtop_client_session() as sess:
             username, csrf_token = await _login(sess)
             if not csrf_token:
                 return {"error": "Login failed"}
@@ -300,7 +354,7 @@ def fetch_attendance_all_sems() -> dict:
 def fetch_timetable() -> dict:
     """Fetch full timetable and save to SQLite (wipe + re-insert). Same retry-once pattern as marks."""
     async def _fetch():
-        async with aiohttp.ClientSession() as sess:
+        async with vtop_client_session() as sess:
             username, csrf_token = await _login(sess)
             if not csrf_token:
                 return {"error": "Login failed"}
@@ -319,7 +373,7 @@ def fetch_timetable() -> dict:
 def fetch_exams() -> dict:
     """Fetch current-semester exam schedule and save to SQLite. Same retry-once pattern as marks."""
     async def _fetch():
-        async with aiohttp.ClientSession() as sess:
+        async with vtop_client_session() as sess:
             username, csrf_token = await _login(sess)
             if not csrf_token:
                 return {"error": "Login failed"}
@@ -341,7 +395,7 @@ def fetch_exams_for_sem(sem_id: str) -> dict:
     per-semester exam data the same way it does attendance/marks, just
     never asked with a specific past semester ID before)."""
     async def _fetch():
-        async with aiohttp.ClientSession() as sess:
+        async with vtop_client_session() as sess:
             username, csrf_token = await _login(sess)
             if not csrf_token:
                 return {"error": "Login failed"}
@@ -377,7 +431,7 @@ def fetch_exams_all_sems() -> dict:
 def fetch_grades() -> dict:
     """Fetch academic history (CGPA + subject grades) and save to SQLite. Same retry-once pattern as marks."""
     async def _fetch():
-        async with aiohttp.ClientSession() as sess:
+        async with vtop_client_session() as sess:
             username, csrf_token = await _login(sess)
             if not csrf_token:
                 return {"error": "Login failed"}
@@ -620,7 +674,7 @@ def format_marks_response(intent: dict) -> str | None:
 # ══════════════════════════════════════════
 
 def _get_spoken_marks_summary(data_text: str, intent: dict) -> str:
-    from core.brain import ask_groq
+    from core.brain import ask_oneshot
 
     line_count = data_text.strip().count("\n")
     if line_count <= 3:
@@ -630,17 +684,21 @@ def _get_spoken_marks_summary(data_text: str, intent: dict) -> str:
 
     prompt = (
         f"Give a SHORT 1-3 sentence spoken summary of this marks data. "
-        f"Mention key numbers only. Be conversational, not robotic. "
+        f"Mention key numbers only. Be conversational, not robotic. Be honest: call a score "
+        f"under half marks weak, never 'solid'. "
         f"Don't read every line.\n\nData:\n{data_text[:1500]}"
     )
     try:
-        return ask_groq(prompt, extra_context="", max_tokens_override=120)
+        summary = ask_oneshot(prompt, max_tokens=120)
+        if summary:
+            return summary
+        raise ValueError("empty summary")
     except Exception:
         for line in data_text.split("\n"):
             line = line.strip()
             if line and ":" in line and not line.endswith(":"):
                 return line
-        return "Got your marks — check the terminal for the full breakdown."
+        return "Got your marks — the full breakdown is on screen."
 
 
 # ══════════════════════════════════════════
@@ -723,6 +781,19 @@ def _attendance_indicator(pct) -> str:
     if pct < 80:
         return "🟡"
     return "🟢"
+
+
+def _attendance_margin(attended, total) -> str:
+    """Exact 75% margin, computed here because the LLM got it wrong in
+    testing (said "2 more" for 17/25, the answer is 7): every class
+    attended or missed also grows the total."""
+    if not total or attended is None:
+        return ""
+    if attended / total < 0.75:
+        need = math.ceil((0.75 * total - attended) / 0.25)
+        return f"need to attend {need} more in a row to reach 75%"
+    can_skip = math.floor((attended - 0.75 * total) / 0.75)
+    return f"can skip {can_skip} more and stay at 75%" if can_skip > 0 else "have no classes to spare"
 
 
 def get_attendance_result(user_input: str, entities: dict = None, on_progress=None) -> FeatureResult:
@@ -822,20 +893,29 @@ def get_attendance_result(user_input: str, entities: dict = None, on_progress=No
     for r in rows:
         pct = r["percentage"]
         pct_str = f"{pct}%" if pct is not None else "N/A"
+        margin = _attendance_margin(r["attended_classes"], r["total_classes"])
         lines.append(
             f"{_attendance_indicator(pct)} {r['course_name']} ({r['course_code']}): "
             f"{pct_str} ({r['attended_classes']}/{r['total_classes']})"
+            + (f" — {margin}" if margin and not is_historical else "")
         )
 
     sem_prefix = f"{SEM_LABELS.get(target_sem, target_sem)} — " if is_historical else ""
 
     if course:
         display = sem_prefix + "Attendance (worst first):\n" + "\n".join(lines)
-        r   = rows[0]
+        # "attendance in daa" matches theory AND lab; speak the one that
+        # was asked about (VIT codes: ...L theory, ...P lab/practical).
+        wants_lab = bool(re.search(r"\b(?:lab|practical|laboratory)\b", user_input.lower()))
+        preferred = [x for x in rows if (x["course_code"] or "").upper().endswith("P") == wants_lab]
+        r   = preferred[0] if preferred else rows[0]
         pct = r["percentage"]
         spoken = (f"In {SEM_LABELS.get(target_sem, target_sem)}, " if is_historical else "") + \
                  (f"{r['course_name']} attendance is {pct}%, "
                   f"{r['attended_classes']} out of {r['total_classes']} classes.")
+        margin = _attendance_margin(r["attended_classes"], r["total_classes"])
+        if margin and not is_historical:
+            spoken += f" You {margin}."
     else:
         # "what's my attendance" / "overall attendance" — no course
         # named, so compute a single combined figure across every
@@ -1009,6 +1089,14 @@ def _bunk_check_for_day(day: str, days_ahead) -> FeatureResult:
     return FeatureResult(ok=True, data={"day": day, "analysis": per_course}, display=display, spoken=spoken)
 
 
+def _course_in_sentence(user_input: str):
+    """Fallback when the classifier returned no course entity ("how many
+    classes can I miss in probability" came back with {})."""
+    from core.course_resolver import resolve_course_best
+    best = resolve_course_best(user_input or "")
+    return best["course_name"] if best else None
+
+
 def get_bunk_check_result(user_input: str, entities: dict = None, on_progress=None) -> FeatureResult:
     """
     "can I skip DBMS", "how many classes can I skip in TOC", "can I
@@ -1020,7 +1108,7 @@ def get_bunk_check_result(user_input: str, entities: dict = None, on_progress=No
     from core.router import normalize_course_query
 
     entities   = entities or {}
-    course     = normalize_course_query(entities.get("course"))
+    course     = normalize_course_query(entities.get("course") or _course_in_sentence(user_input))
     days_ahead = entities.get("days_ahead")
 
     if not get_attendance_fresh_enough(6):
@@ -1059,7 +1147,9 @@ def get_bunk_check_result(user_input: str, entities: dict = None, on_progress=No
     display = "\n".join(lines)
 
     if course:
-        a = analysis[0]
+        # "compiler design" matches theory AND lab — answer the one asked about.
+        wants_lab = bool(re.search(r"\b(?:lab|practical)\b", user_input.lower()))
+        a = next((x for x in analysis if (x.get("course_code") or "").upper().endswith("P") == wants_lab), analysis[0])
         if a["must_attend_next"] > 0:
             spoken = (f"You're already below 75% in {a['course_name']} — "
                       f"attend the next {a['must_attend_next']} classes to recover.")
@@ -1130,8 +1220,17 @@ def _format_day_classes(day: str, classes: list, spoken_prefix: str) -> FeatureR
         lines.append(f"  {c['start_time']}-{c['end_time']} {c['course_name']} ({c['room']})")
     display = "\n".join(lines)
 
-    names  = ", ".join(c["course_name"] for c in sorted_classes[:4])
-    spoken = f"{spoken_prefix} you have {len(sorted_classes)} class(es): {names}."
+    # A two-slot lab is two timetable rows; count it once.
+    merged = []
+    for c in sorted_classes:
+        if merged and merged[-1]["course_code"] == c.get("course_code"):
+            continue
+        merged.append(c)
+    names = [c["course_name"] for c in merged]
+    listed = ", ".join(names[:5]) + (f", and {len(names) - 5} more" if len(names) > 5 else "")
+    first = merged[0]
+    spoken = (f"{spoken_prefix} you have {len(merged)} class{'es' if len(merged) != 1 else ''}, "
+              f"starting {first['start_time']} with {first['course_name']}: {listed}.")
 
     return FeatureResult(ok=True, data={"day": day, "classes": sorted_classes}, display=display, spoken=spoken)
 
@@ -1293,7 +1392,7 @@ def get_timetable_result(mode: str, user_input: str, entities: dict = None, on_p
             for c in _sort_by_start(classes):
                 lines.append(f"  {c['start_time']}-{c['end_time']} {c['course_name']} ({c['room']})")
         display = "This week's timetable:" + "\n".join(lines)
-        spoken  = "Here's your week — check the terminal for the full breakdown."
+        spoken  = "Here's your week — the full breakdown is on screen."
         return FeatureResult(ok=True, data={"timetable": full}, display=display, spoken=spoken)
 
     if mode == "next_class":
@@ -1425,25 +1524,54 @@ def get_exams_result(user_input: str, entities: dict = None, on_progress=None) -
         return FeatureResult(ok=True, data={"exams": []}, display=msg, spoken=msg)
 
     now = _dt.datetime.now()
-    def _days_until(r):
-        d = _parse_exam_date(r.get("exam_date"))
-        return (d - now).days if d else 10**9
 
-    rows = sorted(rows, key=_days_until)
+    def _start(r):
+        """Exam date + the session's start time ("02:00 PM - 03:30 PM").
+        Date-only comparison treated today's afternoon exam as already
+        past from midnight on."""
+        d = _parse_exam_date(r.get("exam_date"))
+        if not d:
+            return None
+        m = re.search(r"(\d{1,2}):(\d{2})\s*(AM|PM)", str(r.get("session") or ""), re.IGNORECASE)
+        if m:
+            h = int(m.group(1)) % 12 + (12 if m.group(3).upper() == "PM" else 0)
+            d = d.replace(hour=h, minute=int(m.group(2)))
+        return d
+
+    def _days_until(r):
+        """Calendar days (today=0, tomorrow=1), not truncated 24h blocks —
+        tomorrow's exam seen at 1 AM used to come out as "0 day(s) away"."""
+        d = _start(r)
+        return (d.date() - now.date()).days if d else 10**9
+
+    def _not_over(r):
+        d = _start(r)
+        return d is not None and d + _dt.timedelta(hours=2) > now
+
+    rows = sorted(rows, key=lambda r: _start(r) or _dt.datetime.max)
 
     if when == "next":
-        upcoming = [r for r in rows if _days_until(r) >= 0]
+        upcoming = [r for r in rows if _not_over(r)]
         if not upcoming:
             msg = "No upcoming exams found — looks like everything on record has already happened."
             return FeatureResult(ok=True, data={"exams": []}, display=msg, spoken=msg)
-        rows = upcoming[:1]
+        # "which one is after that" / "the one after" -> the second one
+        after = re.search(r"\b(after that|after this|the one after|following one|second one|next one after)\b",
+                          (user_input or "").lower())
+        rows = upcoming[1:2] if after and len(upcoming) > 1 else upcoming[:1]
 
     def _days_str(d):
         if d >= 10**9:
             return "date unknown"
-        if d >= 0:
-            return f"{d} day(s) away"
-        return f"{-d} day(s) ago"
+        if d == 0:
+            return "today"
+        if d == 1:
+            return "tomorrow"
+        if d > 1:
+            return f"in {d} days"
+        if d == -1:
+            return "yesterday"
+        return f"{-d} days ago"
 
     lines = []
     for r in rows:
@@ -1460,7 +1588,10 @@ def get_exams_result(user_input: str, entities: dict = None, on_progress=None) -
     d0 = _days_until(r0)
     sem_spoken_prefix = f"In {SEM_LABELS.get(target_sem, target_sem)}, " if is_historical else ""
     if when == "next":
-        spoken = f"{sem_spoken_prefix}Next exam is {r0['course_name']} on {r0['exam_date']}, {_days_str(d0)}."
+        at = (r0.get("session") or "").split(" - ")[0]
+        where = f" in {r0['venue']}" if r0.get("venue") else ""
+        spoken = (f"{sem_spoken_prefix}Next exam is {r0.get('exam_type') or ''} {r0['course_name']} "
+                  f"{_days_str(d0)}{f' at {at}' if at else ''}{where}.").replace("  ", " ")
     elif len(rows) == 1:
         spoken = f"{sem_spoken_prefix}{r0['course_name']} {when.upper()} is on {r0['exam_date']}, {_days_str(d0)}."
     elif is_historical:
@@ -1568,7 +1699,7 @@ def get_grades_result(mode: str, user_input: str, entities: dict = None, on_prog
             r = rows[0]
             spoken = f"Your grade in {r['course_name']} was {r['grade']}."
         else:
-            spoken = f"You have grades for {len(rows)} course(s). Check the terminal for the full list."
+            spoken = f"You have grades for {len(rows)} course(s). The full list is on screen."
         return FeatureResult(ok=True, data={"rows": rows}, display=display, spoken=spoken)
 
     msg = "I'm not sure what grade info you want."

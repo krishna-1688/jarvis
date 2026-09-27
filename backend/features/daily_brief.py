@@ -102,19 +102,13 @@ def _exam_section() -> str:
     if not rows:
         return "🗓️ No exam schedule synced yet."
 
-    now      = _dt.datetime.now()
-    upcoming = []
-    for r in rows:
-        d = _parse_exam_date(r.get("exam_date"))
-        if d and (d - now).days >= 0:
-            upcoming.append((r, (d - now).days))
-
-    if not upcoming:
+    # Same logic as "when is my next exam" — the old date-only maths
+    # dropped an afternoon exam from the brief once midnight had passed.
+    from features.vtop import get_exams_result
+    result = get_exams_result("next exam", entities={"when": "next"})
+    if not result.data.get("exams"):
         return "🗓️ No upcoming exams found."
-
-    upcoming.sort(key=lambda x: x[1])
-    r, days = upcoming[0]
-    return f"🗓️ Next exam: {r['course_name']} in {days} day(s) ({r['exam_date']})."
+    return f"🗓️ {result.spoken}"
 
 
 def _bunk_warning_section() -> str:
@@ -207,12 +201,12 @@ def _last_night_focus_section() -> str:
 # Ordered most- to least-actionable — trimmed from the end (least
 # actionable first) if the assembled brief runs past _MAX_LINES.
 _SECTION_ORDER = [
+    _exam_section,
+    _bunk_warning_section,
     _today_classes_section,
     _tasks_today_section,
     _assignments_section,
     _attendance_section,
-    _bunk_warning_section,
-    _exam_section,
     _custom_schedule_section,
     _last_night_focus_section,
     _yesterday_expense_section,
@@ -256,7 +250,48 @@ def send_daily_brief() -> FeatureResult:
 
 
 def get_daily_brief_result(user_input: str, entities: dict = None, on_progress=None) -> FeatureResult:
-    """Voice-triggered 'give me my brief' — builds and sends the same brief as the 6:30 AM job."""
+    """'give me my brief' shows and speaks the brief. It used to always
+    WhatsApp it instead — so asking in person got "Sent your brief", and
+    with the WhatsApp service down the request failed outright. Sending is
+    now only for an explicit "send/whatsapp me my brief"."""
+    import re
+    if re.search(r"\b(send|whatsapp|text|message)\b", (user_input or "").lower()):
+        return send_daily_brief()
     if on_progress:
         on_progress("Putting your brief together, boss.")
-    return send_daily_brief()
+    message = build_daily_brief()
+    return FeatureResult(ok=True, data={"message": message}, display=message, spoken=_spoken_brief())
+
+
+def _spoken_brief() -> str:
+    """Built straight from the data. An LLM summary was tried and, in
+    testing, called ordinary classes "exams" and invented low-attendance
+    warnings — not acceptable for a brief people act on."""
+    import datetime as _dt
+    from core.memory import get_timetable_for_day
+    parts = []
+    exam = _exam_section()
+    if exam.startswith("🗓️ Next exam is") and (" today" in exam or " tomorrow" in exam):
+        parts.append(exam.replace("🗓️ ", ""))
+    warn = _bunk_warning_section()
+    if warn:
+        parts.append(warn.replace("⚠️ ", ""))
+    try:
+        classes = sorted(get_timetable_for_day(_dt.datetime.now().strftime("%A")), key=lambda c: c.get("start_time") or "")
+    except Exception:
+        classes = []
+    if classes:
+        courses = list(dict.fromkeys(c["course_name"] for c in classes))
+        parts.append(f"{len(courses)} class{'es' if len(courses) != 1 else ''} today, first at "
+                     f"{classes[0]['start_time']} — {classes[0]['course_name']}.")
+    else:
+        parts.append("No classes today.")
+    try:
+        from core.memory import get_pending_lms_assignments
+        overdue = [a for a in get_pending_lms_assignments()
+                   if a.get("due_date") and a["due_date"] < _dt.datetime.now().isoformat()]
+        if overdue:
+            parts.append(f"{len(overdue)} assignment{'s are' if len(overdue) != 1 else ' is'} overdue.")
+    except Exception:
+        pass
+    return " ".join(parts) + " Full brief is on screen."

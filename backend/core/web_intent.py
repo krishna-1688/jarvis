@@ -10,22 +10,9 @@ compare) in one small structured call.
 
 import os
 import sys
-import json
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from groq import Groq
-from config import GROQ_API_KEY, GROQ_CLASSIFIER_MODEL
-
-# max_retries=0 — see core/router.py's identical comment.
-groq_client = Groq(api_key=GROQ_API_KEY, max_retries=0, timeout=6.0)
-
-WEB_TRIGGER_WORDS = [
-    "open", "go to", "search", "look up", "find", "compare",
-    "summarize", "summarise", "what does this page say",
-    "what are the reviews", "browse", "google",
-    "click", "scroll", "close tab", "close this tab", "close the tab",
-    "go back a page", "previous page", "back a page",
-]
+from core.llm import complete_json
 
 EXTRACTION_PROMPT = """You extract web browsing actions from natural speech for a voice assistant.
 
@@ -56,6 +43,7 @@ Rules:
 - If a site isn't named for "search", set site to null (caller will do a general web search).
 - For "search", if user just says "search X" with no site, that's still a valid search action with site=null.
 - "site" field should be the site name only (e.g. "amazon"), not a full URL.
+- A general-knowledge question ("what is recursion", "explain TCP") is "none" — the assistant answers those itself, it should not open a browser.
 
 Now extract from this input:
 Input: "{user_input}"
@@ -69,23 +57,9 @@ def extract_web_intent(text: str) -> dict | None:
        "site_a": None, "site_b": None}
     or None if this clearly isn't a web browsing request.
     """
-    t_lower = text.lower()
-    if not any(w in t_lower for w in WEB_TRIGGER_WORDS):
-        return None
-
     try:
         prompt = EXTRACTION_PROMPT.replace("{user_input}", text)
-        response = groq_client.chat.completions.create(
-            model=GROQ_CLASSIFIER_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=120,
-            temperature=0,
-        )
-        raw = response.choices[0].message.content.strip()
-        if raw.startswith("```"):
-            raw = raw.strip("`").replace("json", "", 1).strip()
-
-        data = json.loads(raw)
+        data = complete_json([{"role": "user", "content": prompt}], max_tokens=120)
         action = data.get("action")
 
         if not action or action == "none":

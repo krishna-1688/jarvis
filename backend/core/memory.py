@@ -13,21 +13,15 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import json
 import re
 import sqlite3
-import chromadb
+import threading
 from datetime import datetime, timedelta
 
 # ── Paths ──────────────────────────────────────────────
 BASE_DIR    = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DB_PATH     = os.path.join(BASE_DIR, "data", "database", "jarvis.db")
-CHROMA_PATH = os.path.join(BASE_DIR, "data", "memory", "chromadb")
 
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-os.makedirs(CHROMA_PATH, exist_ok=True)
 
-# ── ChromaDB ───────────────────────────────────────────
-chroma_client           = chromadb.PersistentClient(path=CHROMA_PATH)
-facts_collection        = chroma_client.get_or_create_collection("personal_facts")
-conversation_collection = chroma_client.get_or_create_collection("conversations")
 
 # ── Semester ID → Label ────────────────────────────────
 SEM_LABELS = {
@@ -1415,31 +1409,77 @@ def get_grade_for_course(course_query: str) -> list:
 
 
 # ══════════════════════════════════════════════════════════
-#   PERSONAL FACTS (ChromaDB)
+#   LONG-TERM MEMORY (SQLite FTS5)
 # ══════════════════════════════════════════════════════════
+# Replaced ChromaDB + its ONNX embedding model (~70 MB resident, several
+# seconds to load) — too heavy for a process meant to idle all day.
+# Facts are few, so all of them are handed to the model (nothing can be
+# missed); past conversations are searched with SQLite's built-in
+# full-text index and only used when they share real content words with
+# the new question.
+
+_STOPWORDS = {
+    "the", "and", "for", "are", "was", "what", "whats", "how", "why", "who", "when", "where", "which",
+    "you", "your", "yours", "me", "my", "mine", "can", "could", "would", "should", "will", "just", "about",
+    "this", "that", "these", "those", "with", "from", "have", "has", "had", "does", "did", "not", "any",
+    "tell", "give", "please", "jarvis", "boss", "its", "it's", "is", "am", "be", "been", "there", "then",
+    "some", "into", "also", "like", "get", "got", "want", "need", "know", "make", "let", "one", "all",
+}
+MAX_FACTS_IN_CONTEXT = 25
+
+
+def _content_words(text: str) -> set:
+    return {w for w in re.findall(r"[a-z0-9']+", (text or "").lower()) if len(w) >= 3 and w not in _STOPWORDS}
+
+
+def _init_memory_tables(conn):
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS remembered_facts (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            fact       TEXT NOT NULL,
+            category   TEXT DEFAULT 'general',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE VIRTUAL TABLE IF NOT EXISTS conversations_fts
+            USING fts5(user_msg, jarvis_msg, content='conversations', content_rowid='id');
+        CREATE TRIGGER IF NOT EXISTS conversations_ai AFTER INSERT ON conversations BEGIN
+            INSERT INTO conversations_fts(rowid, user_msg, jarvis_msg) VALUES (new.id, new.user_msg, new.jarvis_msg);
+        END;
+        CREATE TRIGGER IF NOT EXISTS conversations_ad AFTER DELETE ON conversations BEGIN
+            INSERT INTO conversations_fts(conversations_fts, rowid, user_msg, jarvis_msg)
+                VALUES ('delete', old.id, old.user_msg, old.jarvis_msg);
+        END;
+    """)
+    # count(*) on an external-content FTS table reads the SOURCE table, so
+    # it can't tell whether the index was ever built — use a one-time flag.
+    built = conn.execute("SELECT value FROM preferences WHERE key='conversations_fts_v1'").fetchone()
+    if not built:
+        conn.execute("INSERT INTO conversations_fts(conversations_fts) VALUES ('rebuild')")
+        conn.execute("INSERT OR REPLACE INTO preferences (key, value) VALUES ('conversations_fts_v1', '1')")
+    conn.commit()
+
 
 def remember_fact(fact: str, category: str = "general") -> str:
-    fid = f"fact_{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
-    facts_collection.add(
-        documents=[fact],
-        metadatas=[{"category": category, "timestamp": datetime.now().isoformat()}],
-        ids=[fid]
-    )
+    conn = get_db()
+    conn.execute("INSERT INTO remembered_facts (fact, category) VALUES (?, ?)", (fact.strip(), category))
+    conn.commit()
+    conn.close()
     return "Got it, I'll remember that."
 
-def recall_facts(query: str, n: int = 3) -> list:
-    try:
-        count = facts_collection.count()
-        if count == 0:
-            return []
-        results = facts_collection.query(query_texts=[query], n_results=min(n, count))
-        return results["documents"][0] if results["documents"][0] else []
-    except Exception:
-        return []
+
+def list_facts(limit: int = 50) -> list:
+    conn = get_db()
+    rows = conn.execute("SELECT fact FROM remembered_facts ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+    conn.close()
+    return [r["fact"] for r in rows]
+
+
+def recall_facts(query: str, n: int = MAX_FACTS_IN_CONTEXT) -> list:
+    return list_facts(limit=n)
 
 
 # ══════════════════════════════════════════════════════════
-#   CONVERSATIONS (SQLite + ChromaDB)
+#   CONVERSATIONS
 # ══════════════════════════════════════════════════════════
 
 _TRIVIAL = {"ok","okay","thanks","thank you","got it","sure","yes",
@@ -1453,36 +1493,43 @@ def save_conversation(user_msg: str, jarvis_msg: str, topic: str = "general"):
     )
     conn.commit()
     conn.close()
-    words = user_msg.lower().split()
-    if len(words) > 5 and not set(words).issubset(_TRIVIAL):
-        try:
-            cid = f"conv_{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
-            conversation_collection.add(
-                documents=[f"KK: {user_msg} | Jarvis: {jarvis_msg}"],
-                metadatas=[{"topic": topic, "ts": datetime.now().isoformat()}],
-                ids=[cid]
-            )
-        except Exception:
-            pass
 
-def recall_conversations(query: str, n: int = 2) -> list:
-    try:
-        count = conversation_collection.count()
-        if count == 0:
-            return []
-        results = conversation_collection.query(query_texts=[query], n_results=min(n, count))
-        return results["documents"][0] if results["documents"][0] else []
-    except Exception:
+
+def recall_conversations(query: str, n: int = 1) -> list:
+    """A past exchange sharing at least two content words (and half of the
+    question's content words) with this one — otherwise nothing."""
+    words = _content_words(query)
+    if len(words) < 2:
         return []
+    match = " OR ".join(f'"{w}"' for w in sorted(words))
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            "SELECT c.user_msg, c.jarvis_msg FROM conversations_fts f JOIN conversations c ON c.id = f.rowid "
+            "WHERE conversations_fts MATCH ? ORDER BY bm25(conversations_fts) LIMIT 5", (match,)
+        ).fetchall()
+    except sqlite3.Error:
+        rows = []
+    finally:
+        conn.close()
+    out = []
+    for r in rows:
+        overlap = words & _content_words(r["user_msg"])
+        if len(overlap) >= 2 and len(overlap) >= len(words) / 2 and len(r["user_msg"].split()) > 3:
+            out.append(f"KK: {r['user_msg']} | Jarvis: {r['jarvis_msg']}")
+            if len(out) >= n:
+                break
+    return out
+
 
 def build_context(user_input: str) -> str:
     parts = []
-    facts = recall_facts(user_input, n=2)
+    facts = recall_facts(user_input)
     convs = recall_conversations(user_input, n=1)
     if facts:
-        parts.append("Relevant memory: " + " | ".join(facts))
+        parts.append("Things KK asked you to remember: " + " | ".join(facts))
     if convs:
-        parts.append("Past context: " + convs[0][:150])
+        parts.append("A related past exchange: " + convs[0][:200])
     return "\n".join(parts)
 
 
@@ -2007,3 +2054,7 @@ def get_lms_last_sync() -> str | None:
 
 # ── Init on import ─────────────────────────────────────
 init_db()
+
+_mem_conn = get_db()
+_init_memory_tables(_mem_conn)
+_mem_conn.close()

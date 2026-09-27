@@ -1,169 +1,85 @@
 """
-wakeword.py — Wake word listener.
+wakeword.py — "Hey Jarvis" detection built for all-day standby.
 
-- No is_shutdown_requested import (removed entirely)
-- set_busy()/is_busy() are the ONLY way to check busy state
-  (never import _jarvis_busy directly elsewhere)
-- Stream stops/starts cleanly with no audio device conflict
+Cost control, measured on this laptop:
+  - openWakeWord's package __init__ imports its *training* helper, which
+    pulls in scikit-learn (~100 MB) though detection never uses it. That
+    import is stubbed out: the process drops from ~208 MB to ~110 MB.
+  - The wake model costs ~8% of one core whenever it runs, so it only
+    runs while webrtcvad (a few microseconds per frame) hears human
+    speech. Fans, typing and silence never reach it. The last ~1 s of
+    audio is kept and replayed when speech starts, and frames keep flowing
+    for ~1.6 s after it stops, so the model always sees the whole phrase.
+
+JARVIS_WAKE_THRESHOLD tunes sensitivity (default 0.4); near misses are
+logged so it can be tuned per mic.
 """
 
 import os
 import sys
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-import pyaudio
-import numpy as np
-import openwakeword
-from openwakeword.model import Model
-import threading
 import time
+import types
+from collections import deque
 
-from core.voice_bridge import push_voice_event
-from core.audio_device import get_input_device_index
+import numpy as np
 
-openwakeword.utils.download_models()
-
-oww_model = Model(
-    wakeword_models=["hey_jarvis_v0.1"],
-    inference_framework="onnx"
-)
-
-CHUNK     = 1280
-FORMAT    = pyaudio.paInt16
-CHANNELS  = 1
-RATE      = 16000
-THRESHOLD = 0.05
-COOLDOWN  = 2.0
-
-_jarvis_busy      = False
-_listener_running = True
-_stream           = None
-_pa               = None
-_stream_lock      = threading.Lock()
-_busy_lock        = threading.Lock()
+THRESHOLD = float(os.environ.get("JARVIS_WAKE_THRESHOLD", "0.4"))
+NEAR_MISS = THRESHOLD * 0.5
+PREROLL_CHUNKS = 12   # ~1 s of 80 ms chunks
+HANG_CHUNKS = 20      # keep feeding ~1.6 s after the last speech frame
+VAD_FRAME = 320       # 20 ms at 16 kHz; an 80 ms chunk is 4 VAD frames
 
 
-def set_busy(state: bool):
-    global _jarvis_busy
-    with _busy_lock:
-        _jarvis_busy = state
+def _load_model():
+    if "openwakeword.custom_verifier_model" not in sys.modules:
+        stub = types.ModuleType("openwakeword.custom_verifier_model")
+        stub.train_custom_verifier = None
+        sys.modules["openwakeword.custom_verifier_model"] = stub
+    from openwakeword.model import Model
+    return Model(wakeword_models=["hey_jarvis_v0.1"], inference_framework="onnx")
 
 
-def is_busy() -> bool:
-    with _busy_lock:
-        return _jarvis_busy
+class WakeDetector:
+    def __init__(self):
+        import webrtcvad
+        self._vad = webrtcvad.Vad(2)
+        self._model = _load_model()
+        self._preroll = deque(maxlen=PREROLL_CHUNKS)
+        self._hang = 0
+        self._last_near_miss = 0.0
+        self.model_frames = 0  # how often the model actually ran (for stats)
 
+    def _is_speech(self, chunk: np.ndarray) -> bool:
+        raw = chunk.tobytes()
+        voiced = 0
+        for i in range(0, len(chunk), VAD_FRAME):
+            try:
+                if self._vad.is_speech(raw[i * 2:(i + VAD_FRAME) * 2], 16000):
+                    voiced += 1
+            except Exception:
+                pass
+        return voiced >= 2
 
-def stop_stream():
-    global _stream, _pa
-    with _stream_lock:
-        try:
-            if _stream:
-                _stream.stop_stream()
-                _stream.close()
-                _stream = None
-        except Exception:
-            pass
-        try:
-            if _pa:
-                _pa.terminate()
-                _pa = None
-        except Exception:
-            pass
+    def process(self, chunk: np.ndarray) -> float:
+        """Returns the wake score for this 80 ms chunk (0 when gated off)."""
+        speech = self._is_speech(chunk)
+        if not speech and self._hang == 0:
+            self._preroll.append(chunk)
+            return 0.0
+        if self._hang == 0:
+            for frame in self._preroll:
+                self._model.predict(frame)
+            self._preroll.clear()
+        self._hang = HANG_CHUNKS if speech else self._hang - 1
+        self.model_frames += 1
+        score = max(self._model.predict(chunk).values())
+        now = time.time()
+        if NEAR_MISS <= score < THRESHOLD and now - self._last_near_miss > 3:
+            self._last_near_miss = now
+            print(f"  (wake near-miss: score {score:.2f} < threshold {THRESHOLD:.2f})")
+        return score
 
-
-def start_stream():
-    global _stream, _pa
-    stop_stream()
-    time.sleep(0.2)
-    with _stream_lock:
-        try:
-            _pa     = pyaudio.PyAudio()
-            _stream = _pa.open(
-                format=FORMAT,
-                channels=CHANNELS,
-                rate=RATE,
-                input=True,
-                input_device_index=get_input_device_index(),
-                frames_per_buffer=CHUNK
-            )
-        except Exception as e:
-            print(f"Stream start error: {e}")
-
-
-def _trigger_and_wait(callback):
-    """Speaks 'Yes boss?', runs callback, then conversation_loop clears busy."""
-    from core.voice import speak
-    speak("Yes boss?")
-    callback()
-
-
-def _listener_loop(callback):
-    start_stream()
-    last_triggered = 0
-
-    print("👁️  Standby — say 'Hey Jarvis'")
-
-    while _listener_running:
-        try:
-            if is_busy():
-                time.sleep(0.05)
-                continue
-
-            with _stream_lock:
-                if _stream is None:
-                    time.sleep(0.1)
-                    continue
-                try:
-                    data = _stream.read(CHUNK, exception_on_overflow=False)
-                except Exception:
-                    time.sleep(0.05)
-                    continue
-
-            audio_data = np.frombuffer(data, dtype=np.int16)
-
-            if np.abs(audio_data).mean() < 30:
-                continue
-
-            prediction = oww_model.predict(audio_data)
-
-            now = time.time()
-            for model_name, score in prediction.items():
-                if score >= THRESHOLD and (now - last_triggered) >= COOLDOWN:
-                    print(f"\n✅ Wake word! (score: {score:.2f})")
-                    last_triggered = now
-                    oww_model.reset()
-                    push_voice_event({"type": "wake"})
-
-                    set_busy(True)
-                    stop_stream()  # release mic before speak() / conversation_loop's listen()
-
-                    t = threading.Thread(
-                        target=_trigger_and_wait,
-                        args=(callback,),
-                        daemon=True
-                    )
-                    t.start()
-
-                    # Wait until conversation_loop clears busy (in its finally block)
-                    while is_busy():
-                        time.sleep(0.1)
-
-                    start_stream()
-
-        except Exception as e:
-            if "stream" not in str(e).lower():
-                print(f"Listener error: {e}")
-            time.sleep(0.1)
-
-    stop_stream()
-
-
-def start_wakeword_listener(callback):
-    t = threading.Thread(
-        target=_listener_loop,
-        args=(callback,),
-        daemon=True
-    )
-    t.start()
-    return t
+    def reset(self):
+        self._model.reset()
+        self._preroll.clear()
+        self._hang = 0

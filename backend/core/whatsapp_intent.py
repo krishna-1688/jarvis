@@ -12,21 +12,9 @@ or {"recipient": null, "message": null} if it's not a WhatsApp request at all.
 
 import os
 import sys
-import json
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from groq import Groq
-from config import GROQ_API_KEY, GROQ_CLASSIFIER_MODEL
-
-# max_retries=0 — see core/router.py's identical comment.
-groq_client = Groq(api_key=GROQ_API_KEY, max_retries=0, timeout=6.0)
-
-# Keep this list as a cheap pre-filter so we don't waste a Groq call
-# on messages that obviously have nothing to do with WhatsApp.
-WHATSAPP_TRIGGER_WORDS = [
-    "whatsapp", "message", "msg", "text ", "tell ", "send a message",
-    "send message"
-]
+from core.llm import complete_json
 
 EXTRACTION_PROMPT = """You extract WhatsApp message requests from natural speech.
 
@@ -57,6 +45,12 @@ Output: {"recipient": "nainah jio", "message": "good night"}
 Input: "what's the weather today"
 Output: {"recipient": null, "message": null}
 
+Input: "let amma know I'm on my way"
+Output: {"recipient": "amma", "message": "I'm on my way"}
+
+Input: "tell me a joke"
+Output: {"recipient": null, "message": null}
+
 Input: "whatsapp Arjun that the meeting is postponed to 5pm"
 Output: {"recipient": "Arjun", "message": "the meeting is postponed to 5pm"}
 
@@ -70,32 +64,19 @@ def extract_whatsapp_intent_groq(text: str) -> dict | None:
     Returns {"recipient": str, "message": str} if this is a WhatsApp
     send request, else None.
 
-    Cheap pre-filter first (no Groq call if obviously irrelevant),
-    then a single fast Groq call for actual extraction.
+    The router has already decided this is a WhatsApp request, so there
+    is no keyword pre-filter here any more — it used to reject valid
+    phrasings the router accepted ("let amma know I'm late").
     """
-    t_lower = text.lower()
-    if not any(w in t_lower for w in WHATSAPP_TRIGGER_WORDS):
-        return None
-
     try:
         prompt = EXTRACTION_PROMPT.replace("{user_input}", text)
-        response = groq_client.chat.completions.create(
-            model=GROQ_CLASSIFIER_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=100,
-            temperature=0,
-        )
-        raw = response.choices[0].message.content.strip()
-
-        # Strip accidental markdown fences if Groq adds them
-        if raw.startswith("```"):
-            raw = raw.strip("`").replace("json", "", 1).strip()
-
-        data = json.loads(raw)
+        data = complete_json([{"role": "user", "content": prompt}], max_tokens=100)
         recipient = data.get("recipient")
         message   = data.get("message")
 
-        if recipient and message and recipient.lower() != "null" and message.lower() != "null":
+        if (isinstance(recipient, str) and isinstance(message, str)
+                and recipient.strip() and message.strip()
+                and recipient.lower() != "null" and message.lower() != "null"):
             return {"recipient": recipient.strip(), "message": message.strip()}
         return None
 

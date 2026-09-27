@@ -32,7 +32,7 @@ _state = {
 _lock = threading.RLock()
 
 _FOCUS_LEAD_INS = re.compile(
-    r'^(focus mode|start focus mode|start pomodoro|start focus|focus on|pomodoro)\s*',
+    r'^(?:(?:please|can you|let\'s|lets)\s+)*(?:start|begin)?\s*(?:a\s+)?(?:focus mode|focus session|pomodoro|focus)\b\s*(?:(?:on|for studying|studying)\b)?\s*',
     re.IGNORECASE,
 )
 _DURATION_RE = re.compile(r'(\d+)\s*(hours?|hrs?|minutes?|mins?)', re.IGNORECASE)

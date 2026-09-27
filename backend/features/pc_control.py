@@ -2,16 +2,20 @@ import os
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import re
 import shutil
 import subprocess
-import pyautogui
 import psutil
-import pyperclip
-import pygetwindow as gw
-from pycaw.pycaw import AudioUtilities
 from rapidfuzz import fuzz, process as rf_process
 
 from features.base import FeatureResult
+
+# pyautogui / pygetwindow / pyperclip / pycaw (~20 MB with their deps) are
+# imported inside the functions that use them: the backend runs all day,
+# and most of that time nobody is taking screenshots or moving windows.
+def _gw():
+    import pygetwindow
+    return pygetwindow
 
 # ── Volume Control (real level via pycaw, not blind keypresses) ─
 _volume_interface = None
@@ -33,6 +37,7 @@ def _volume_iface():
     global _volume_interface
     if _volume_interface is None:
         _ensure_com()
+        from pycaw.pycaw import AudioUtilities
         _volume_interface = AudioUtilities.GetSpeakers().EndpointVolume
     return _volume_interface
 
@@ -95,6 +100,7 @@ def get_system_status(topic: str = None):
 
 # ── Clipboard ──────────────────────────────
 def get_clipboard_text():
+    import pyperclip
     text = pyperclip.paste()
     if not text or not text.strip():
         return False, "Clipboard is empty"
@@ -164,7 +170,7 @@ def open_app(app_name):
     except Exception:
         return False, f"App not found: {app_name}"
 
-def kill_process_fuzzy(name_query: str, threshold: int = 70):
+def kill_process_fuzzy(name_query: str, threshold: int = 85):
     all_names = sorted(set(
         p.info['name'] for p in psutil.process_iter(['name']) if p.info['name']
     ))
@@ -210,17 +216,17 @@ def close_app(app_name):
 
 # ── Window Management ─────────────────────
 def _resolve_window(title_query: str, threshold: int = 70):
-    titles = [t for t in gw.getAllTitles() if t.strip()]
+    titles = [t for t in _gw().getAllTitles() if t.strip()]
     if not titles:
         return None
     match = rf_process.extractOne(title_query, titles, scorer=fuzz.WRatio)
     if not match or match[1] < threshold:
         return None
-    wins = gw.getWindowsWithTitle(match[0])
+    wins = _gw().getWindowsWithTitle(match[0])
     return wins[0] if wins else None
 
 def list_windows():
-    titles = [t for t in gw.getAllTitles() if t.strip()]
+    titles = [t for t in _gw().getAllTitles() if t.strip()]
     if not titles:
         return False, "No open windows found"
     preview = ", ".join(titles[:15])
@@ -270,6 +276,7 @@ def close_window(title_query: str):
 # ── Screenshot ────────────────────────────
 def take_screenshot():
     path = os.path.expanduser("~/Desktop/jarvis_screenshot.png")
+    import pyautogui
     screenshot = pyautogui.screenshot()
     screenshot.save(path)
     return True, "Screenshot saved to Desktop"
@@ -354,21 +361,34 @@ def confirm_pending_system_action(confirmed: bool) -> tuple:
     return False, "Unknown pending action."
 
 # ── File Search ───────────────────────────
+_SEARCH_SKIP_DIRS = {"node_modules", ".git", "__pycache__", ".venv", "venv", "env",
+                     "site-packages", "dist", "build", ".cache", "AppData"}
+_SEARCH_MAX_FILES = 60000
+
 def search_file(filename):
+    """Opens the first file whose name contains `filename`. Skips
+    dependency/VCS folders and stops at the first hit — the old walk
+    scanned every node_modules tree under Desktop before answering."""
+    filename = (filename or "").strip().lower()
+    if len(filename) < 2:
+        return False, "Which file should I look for?"
     search_paths = [
         os.path.expanduser("~/Desktop"),
         os.path.expanduser("~/Documents"),
         os.path.expanduser("~/Downloads"),
     ]
-    found = []
+    scanned = 0
     for path in search_paths:
         for root, dirs, files in os.walk(path):
+            dirs[:] = [d for d in dirs if d not in _SEARCH_SKIP_DIRS and not d.startswith(".")]
             for file in files:
-                if filename.lower() in file.lower():
-                    found.append(os.path.join(root, file))
-    if found:
-        os.startfile(found[0])
-        return True, f"Found and opened {found[0]}"
+                scanned += 1
+                if filename in file.lower():
+                    found = os.path.join(root, file)
+                    os.startfile(found)
+                    return True, f"Found and opened {found}"
+            if scanned > _SEARCH_MAX_FILES:
+                return False, f"Couldn't find {filename} quickly — try a more specific name."
     return False, f"File {filename} not found"
 
 # ── Main Handler ──────────────────────────
@@ -388,7 +408,7 @@ _DOWN_WORDS = ["down", "decrease", "lower", "quieter", "dimmer", "less", "reduce
 # an unrelated or ambiguous sentence.
 _PC_TARGET_WORDS = ("pc", "computer", "system", "laptop", "machine")
 _BARE_SHUTDOWN_PHRASES = {"shutdown", "shut down", "shutdown please", "shut down please"}
-_BARE_RESTART_PHRASES = {"restart", "restart please"}
+_BARE_RESTART_PHRASES = {"restart", "restart please", "reboot"}
 _BARE_SLEEP_PHRASES = {"sleep", "sleep please", "go to sleep"}
 
 def _is_explicit_pc_action(text: str, action_words: tuple, bare_phrases: set) -> bool:
@@ -417,87 +437,92 @@ def _extract_window_query(text: str) -> str:
         q = q.replace(word, "")
     return " ".join(q.split()).strip()
 
+def _has_word(text: str, *words) -> bool:
+    return any(re.search(rf"(?<!\w){re.escape(w)}(?!\w)", text) for w in words)
+
+_APP_FILLER_RE = re.compile(
+    r"^(?:(?:hey\s+)?jarvis[,\s]+|please\s+|can\s+you\s+|could\s+you\s+|just\s+)*"
+)
+_APP_CMD_RE = re.compile(
+    r"^(open|launch|start|run|close|quit|exit|kill)\s+(?:the\s+|my\s+|up\s+)?(.+?)"
+    r"(?:\s+(?:app|application|program))?(?:\s+(?:please|for me|now))*[.!?]*$"
+)
+_FIND_RE = re.compile(r"^(?:find|search\s+for|locate|search\s+my\s+files\s+for)\s+(?:the\s+|my\s+|a\s+)?(?:file\s+|folder\s+|document\s+|pdf\s+)?(?:called\s+|named\s+)?(.+?)[.!?]*$")
+
+
 def handle_pc_command(text) -> "FeatureResult | None":
-    text = text.lower()
+    text = text.lower().strip()
+    cmd = _APP_FILLER_RE.sub("", text)
 
     # "cancel shutdown" must be checked before the bare "shutdown" check
-    # below — "shutdown" is a substring of "cancel shutdown", so the
-    # bare check would otherwise ALWAYS fire first and actually shut
-    # the PC down instead of cancelling a pending one.
-    if "cancel shutdown" in text or "cancel the shutdown" in text:
+    # below — "shutdown" is a substring of "cancel shutdown".
+    if "cancel shutdown" in text or "cancel the shutdown" in text or "cancel restart" in text or "cancel the restart" in text:
         ok, msg = cancel_shutdown()
-    # Status QUERIES must be checked before the "unmute"/"mute" action
-    # branches below — "is it muted" contains "muted", which contains
-    # "mute" as a substring, so without this the mute-status question
-    # would get treated as a command to actually mute the PC.
+    # Status QUERIES before the mute/unmute actions — "is it muted" must
+    # not mute the PC.
     elif any(p in text for p in _MUTE_STATUS_PHRASES) or any(p in text for p in _VOLUME_LEVEL_PHRASES):
         ok, msg = get_volume_level()
-    # Same substring trap for "unmute" containing "mute" — check it first.
-    elif "unmute" in text:
+    # Whole words only: "commute" used to contain "mute".
+    elif _has_word(text, "unmute"):
         ok, msg = unmute_volume()
-    elif "mute" in text:
+    elif _has_word(text, "mute"):
         ok, msg = mute_volume()
-    # Loosened from exact "volume up"/"increase volume" phrase matching
-    # so natural insertions ("increase THE volume", "turn volume up a
-    # bit") still match instead of silently falling through to chat.
-    elif "volume" in text and any(w in text for w in _UP_WORDS):
+    elif _has_word(text, "volume", "sound") and _has_word(text, *_UP_WORDS):
         ok, msg = volume_up()
-    elif "volume" in text and any(w in text for w in _DOWN_WORDS):
+    elif _has_word(text, "volume", "sound") and _has_word(text, *_DOWN_WORDS):
         ok, msg = volume_down()
-    elif "screenshot" in text:
+    elif _has_word(text, "screenshot"):
         ok, msg = take_screenshot()
-    elif "brightness" in text and any(w in text for w in _UP_WORDS):
+    elif _has_word(text, "brightness") and _has_word(text, *_UP_WORDS):
         ok, msg = brightness_up()
-    elif "brightness" in text and any(w in text for w in _DOWN_WORDS):
+    elif _has_word(text, "brightness") and _has_word(text, *_DOWN_WORDS):
         ok, msg = brightness_down()
-    elif "battery" in text:
+    elif _has_word(text, "battery"):
         ok, msg = get_system_status("battery")
-    elif "cpu" in text:
+    elif _has_word(text, "cpu"):
         ok, msg = get_system_status("cpu")
-    elif "memory" in text:
+    elif _has_word(text, "memory", "ram"):
         ok, msg = get_system_status("memory")
-    elif "disk space" in text or "disk usage" in text or ("disk" in text and "how full" in text):
+    elif _has_word(text, "disk space", "disk usage", "storage") or (_has_word(text, "disk") and "how full" in text):
         ok, msg = get_system_status("disk")
     elif "system status" in text or "system info" in text:
         ok, msg = get_system_status()
     elif "clipboard" in text or "what did i copy" in text or "what's copied" in text or "whats copied" in text:
         ok, msg = get_clipboard_text()
-    # Process-listing queries must be checked before the generic "open"
-    # branch further down — "what apps are open" itself contains the
-    # substring "open" and would otherwise be swallowed as an (invalid)
-    # app-launch attempt instead of answering the question.
-    elif "running processes" in text or "what's running" in text or "whats running" in text \
-            or "what apps are open" in text or "list processes" in text:
+    # Process-listing queries before the generic open/close branch —
+    # "what apps are open" contains "open".
+    elif "running processes" in text or "what's running" in text or "whats running" in text             or "what apps are open" in text or "list processes" in text:
         ok, msg = list_processes()
-    # Window-management branches require the literal word "window" AND
-    # must come before the generic "open"/"close" branches below —
-    # otherwise "close window notepad" would be swallowed by the
-    # existing bare close_app branch before ever reaching these.
-    elif "window" in text and ("switch" in text or "bring up" in text):
+    # Window management requires the literal word "window".
+    elif _has_word(text, "window", "windows") and ("switch" in text or "bring up" in text):
         ok, msg = switch_to_window(_extract_window_query(text))
-    elif "window" in text and "minimize" in text:
+    elif _has_word(text, "window", "windows") and ("minimize" in text or "minimise" in text):
         ok, msg = minimize_window(_extract_window_query(text))
-    elif "window" in text and "maximize" in text:
+    elif _has_word(text, "window", "windows") and ("maximize" in text or "maximise" in text):
         ok, msg = maximize_window(_extract_window_query(text))
-    elif "window" in text and "close" in text:
+    elif _has_word(text, "window") and "close" in text:
         ok, msg = close_window(_extract_window_query(text))
-    elif "window" in text and ("list" in text or "what windows" in text):
+    elif _has_word(text, "window", "windows") and ("list" in text or "what windows" in text):
         ok, msg = list_windows()
     elif _is_explicit_pc_action(text, ("shutdown", "shut down"), _BARE_SHUTDOWN_PHRASES):
         ok, msg = shutdown_pc()
-    elif _is_explicit_pc_action(text, ("restart",), _BARE_RESTART_PHRASES):
+    elif _is_explicit_pc_action(text, ("restart", "reboot"), _BARE_RESTART_PHRASES):
         ok, msg = restart_pc()
-    elif _is_explicit_pc_action(text, ("sleep",), _BARE_SLEEP_PHRASES):
+    elif _is_explicit_pc_action(text, ("sleep", "hibernate"), _BARE_SLEEP_PHRASES):
         ok, msg = sleep_pc()
-    elif "open" in text:
-        app = text.replace("open", "").strip()
-        ok, msg = open_app(app)
-    elif "close" in text:
-        app = text.replace("close", "").strip()
-        ok, msg = close_app(app)
-    elif "find" in text or "search for" in text:
-        filename = text.replace("find", "").replace("search for", "").strip()
-        ok, msg = search_file(filename)
+    elif _APP_CMD_RE.match(cmd):
+        # Verb must START the command and the target is taken verbatim
+        # after it — "how close am I to 75%" used to reach close_app()
+        # (which falls back to fuzzy-killing a running process) with
+        # "how  am i to 75%" as the app name.
+        verb, app = _APP_CMD_RE.match(cmd).groups()
+        app = app.strip()
+        if verb in ("open", "launch", "start", "run"):
+            ok, msg = open_app(app)
+        else:
+            ok, msg = close_app(app)
+    elif _FIND_RE.match(cmd):
+        ok, msg = search_file(_FIND_RE.match(cmd).group(1))
     else:
         return None
 

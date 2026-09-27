@@ -31,12 +31,14 @@ _cached_index = None
 _cache_done = False
 
 
-def get_input_device_index():
+def get_input_device_index(refresh: bool = False):
     """The PyAudio input_device_index to use everywhere in this app —
     memoized after the first call so the one-time probe cost is paid
-    once per process, not on every mic-stream restart."""
+    once per process, not on every mic-stream restart. refresh=True
+    re-probes (core/mic.py does this after the stream fails, e.g. a
+    headset was unplugged)."""
     global _cached_index, _cache_done
-    if _cache_done:
+    if _cache_done and not refresh:
         return _cached_index
 
     override = os.environ.get("JARVIS_MIC_DEVICE_INDEX")

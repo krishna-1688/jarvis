@@ -1,300 +1,216 @@
 """
-jarvis.py — Voice client entry point.
+jarvis.py — the voice process (wake word, speech in, speech out).
 
-Owns audio I/O only (wake word, STT, TTS) — all command handling now
-lives in server.py, reached over HTTP. Both this voice loop and any
-future UI hit the same backend, so there's one brain, not two.
+All command handling lives in server.py; this process only listens and
+talks. It is built to sit in standby all day:
+  - one always-open mic stream (core/mic.py), recovered automatically;
+  - the wake model only runs while real speech is heard (core/wakeword.py);
+  - speech/transcription libraries load on first use.
+
+Run it through run.py (the supervisor), which restarts it if it ever dies.
 """
 
-import sys
 import os
-import atexit
+import sys
 
-# Same fix as server.py: Windows' default console codepage (cp1252)
-# can't encode the box-drawing characters in this file's own startup
-# banner (═, →, etc.) — under that codepage `python jarvis.py` crashes
-# with UnicodeEncodeError before ever reaching the wake-word listener,
-# i.e. before voice has any chance of working at all. Force UTF-8
-# stdout/stderr regardless of the console's codepage.
 if hasattr(sys.stdout, "reconfigure"):
     try:
-        sys.stdout.reconfigure(encoding="utf-8")
-        sys.stderr.reconfigure(encoding="utf-8")
+        sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)
+        sys.stderr.reconfigure(encoding="utf-8", line_buffering=True)
     except Exception:
         pass
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-import time
 import threading
+import time
 
 import requests
 
-from core.voice import (
-    speak, listen, init_microphone,
-    is_shutdown_requested, _is_processing, set_expecting_confirmation,
-    LISTEN_TIMEOUT
-)
-from core.wakeword import start_wakeword_listener, set_busy
 from core.voice_bridge import push_voice_event
+from core import voice
+from core.voice import (
+    speak, record_utterance, transcribe, Offline, is_shutdown_requested, request_shutdown,
+    set_expecting_confirmation,
+)
 
-SERVER_URL     = "http://localhost:8000"
-# Live VTOP fetches (login + captcha, sometimes a retry) have been
-# observed taking 60-90s worst case — keep well above that so a slow
-# but successful fetch doesn't look like a dead backend.
+# 127.0.0.1, not "localhost": on Windows "localhost" tries IPv6 ::1 first,
+# and uvicorn only listens on IPv4 — every request paid a ~2s refused-
+# connection retry before falling back (measured: 2.05s vs 0.03s).
+SERVER_URL = "http://127.0.0.1:8000"
 SERVER_TIMEOUT = 150
+HEARTBEAT_INTERVAL_S = 8
+WAKE_COOLDOWN_S = 2.0
+EMPTY_LIMIT = 4
+DASHBOARD_AFTER_TURNS = 2
 
+_session = requests.Session()
 
-# ══════════════════════════════════════════
-#   SERVER CLIENT
-# ══════════════════════════════════════════
+GOODBYE_PHRASES = [
+    "goodbye jarvis", "go offline", "that's all", "thats all", "stop jarvis", "bye jarvis",
+    "sleep jarvis", "go to standby", "standby mode", "back to standby", "go to sleep",
+]
+MIC_CHECK_PHRASES = ["can you hear me", "are you there", "mic check", "do you hear me"]
+
 
 def call_server(text: str) -> dict:
-    """POSTs to the backend's /command endpoint. Never raises — ANY
-    failure (network, timeout, malformed response, or anything else
-    unforeseen) becomes a spoken/displayed error instead of crashing
-    the voice loop. Deliberately catches Exception broadly, not just
-    requests' own exception types, since a client crash here takes
-    down the entire voice assistant with it."""
+    """Never raises — any failure becomes a spoken error instead of
+    killing the voice loop."""
     try:
-        r = requests.post(
-            f"{SERVER_URL}/command", json={"text": text}, timeout=SERVER_TIMEOUT
-        )
+        r = _session.post(f"{SERVER_URL}/command", json={"text": text, "source": "voice"}, timeout=SERVER_TIMEOUT)
         r.raise_for_status()
         return r.json()
-    except Exception as e:
-        msg = f"Can't reach the Jarvis backend — is server.py running? ({e})"
+    except Exception:
+        msg = "I can't reach my backend right now, boss. Give me a moment."
         return {"ok": False, "display": msg, "spoken": msg, "data": {}, "expecting_confirmation": False}
 
 
-def wait_for_server(timeout: float = 20.0) -> bool:
-    """
-    Polls /health until the backend is up, or gives up after `timeout`
-    seconds.
-
-    Per-attempt timeout is 5s, not the 2s it used to be: /health's own
-    WhatsApp-reachability check (features/whatsapp.py's
-    get_whatsapp_status) has a 3s timeout of its own, which is the
-    NORMAL path whenever whatsapp_service isn't running — a 2s attempt
-    timeout meant every single poll here hit ReadTimeout first and this
-    always reported "Backend not reachable" even when the backend was
-    completely healthy, just slower than 2s to answer.
-    """
+def wait_for_server(timeout: float = 30.0) -> bool:
     start = time.time()
-    while time.time() - start < timeout:
+    while time.time() - start < timeout and not is_shutdown_requested():
         try:
-            r = requests.get(f"{SERVER_URL}/health", timeout=5)
-            if r.status_code == 200:
+            if _session.get(f"{SERVER_URL}/health", timeout=5).status_code == 200:
                 return True
-        except requests.exceptions.RequestException:
+        except requests.RequestException:
             pass
         time.sleep(0.5)
     return False
 
 
-HEARTBEAT_INTERVAL_S = 8
-
 def _heartbeat_worker():
-    """
-    Real voice events (wake/listening/speaking/etc.) only fire when
-    something actually happens — with nobody talking, the frontend has
-    no way to tell "jarvis.py just hasn't heard anything" apart from
-    "jarvis.py isn't running at all" (exactly the failure mode S.1a's
-    diagnostic found: server.py was up, WS was fine, but this process
-    simply wasn't started). A periodic heartbeat gives the frontend a
-    liveness signal independent of actual conversation.
-    """
     while not is_shutdown_requested():
         push_voice_event({"type": "voice_heartbeat"})
         time.sleep(HEARTBEAT_INTERVAL_S)
 
 
-def process(user_input: str) -> tuple[str, str]:
-    _is_processing.set()
-    push_voice_event({"type": "processing_start"})
+def _maybe_open_dashboard(turns: int):
+    """After a couple of exchanges, bring up the dashboard — the backend
+    decides (it knows whether the lid is open and the screen is on)."""
+    if turns != DASHBOARD_AFTER_TURNS:
+        return
     try:
-        response = call_server(user_input)
-        set_expecting_confirmation(bool(response.get("expecting_confirmation", False)))
-        return response.get("display", ""), response.get("spoken", "")
-    finally:
-        _is_processing.clear()
-        push_voice_event({"type": "processing_end"})
-
-
-# ══════════════════════════════════════════
-#   RESPOND
-# ══════════════════════════════════════════
-
-def respond(terminal_text: str, spoken_text: str):
-    if terminal_text != spoken_text:
-        print(f"\n📊 Full data:\n{terminal_text}")
-    # So the Electron frontend's log shows both sides of a voice
-    # conversation, not just the user's transcribed half — pushed before
-    # speak() so it lands slightly ahead of the speaking_start event.
-    push_voice_event({"type": "reply", "text": terminal_text})
-    speak(spoken_text)
-
-
-# ══════════════════════════════════════════
-#   CONVERSATION LOOP
-# ══════════════════════════════════════════
-
-GOODBYE_PHRASES = [
-    "goodbye jarvis", "go offline", "that's all",
-    "thats all", "stop jarvis", "bye jarvis", "sleep jarvis"
-]
-
-# How many consecutive empty listen() cycles before dropping back to
-# standby. Each silent cycle is one LISTEN_TIMEOUT (7s, core/voice.py) —
-# KK wants exactly one silent cycle to drop back to standby (not idle
-# with the mic hot for 30+ seconds), so SILENCE_LIMIT=1 x 7s = 7s total.
-SILENCE_LIMIT = 1
-EMPTY_LIMIT   = 10
-
-def conversation_loop(first_input: str = None, typed_wake: bool = False):
-    print("\n" + "─"*44)
-    print("  💬 Active — speak or type + Enter")
-    print(f"  {LISTEN_TIMEOUT}s of silence → standby  |  ESC → shutdown")
-    print("─"*44)
-
-    silence_count = 0
-    empty_count   = 0
-
-    if first_input:
-        print("⚙️  ...", end="", flush=True)
-        terminal_text, spoken_text = process(first_input)
-        print("\r\033[K", end="", flush=True)
-        respond(terminal_text, spoken_text)
-        time.sleep(0.15)
-
-    while True:
-        if is_shutdown_requested():
-            break
-
-        user_input = listen()
-
-        if user_input == "__SHUTDOWN__":
-            break
-
-        if user_input == "__SILENCE__":
-            silence_count += 1
-            if silence_count >= SILENCE_LIMIT:
-                print("\n👁️  Back to standby...")
-                break
-            continue
-
-        if not user_input or len(user_input.strip()) < 2:
-            empty_count += 1
-            if empty_count >= EMPTY_LIMIT:
-                print("\n👁️  Back to standby...")
-                break
-            continue
-
-        silence_count = 0
-        empty_count   = 0
-
-        if any(p in user_input.lower() for p in GOODBYE_PHRASES):
-            speak("Standing by, boss.")
-            break
-
-        print("⚙️  ...", end="", flush=True)
-        terminal_text, spoken_text = process(user_input)
-        print("\r\033[K", end="", flush=True)
-        respond(terminal_text, spoken_text)
-        time.sleep(0.15)
-
-    set_expecting_confirmation(False)
-    set_busy(False)
-
-
-# ══════════════════════════════════════════
-#   WAKEWORD CALLBACK
-# ══════════════════════════════════════════
-
-def wakeword_conversation():
-    conversation_loop(first_input=None, typed_wake=False)
-
-
-# ══════════════════════════════════════════
-#   CLEANUP
-# ══════════════════════════════════════════
-
-def _cleanup_browser_on_exit():
-    try:
-        from features.web_control import is_browser_open, close_browser
-        if is_browser_open():
-            close_browser()
-    except Exception:
+        _session.post(f"{SERVER_URL}/dashboard/auto_open", timeout=3)
+    except requests.RequestException:
         pass
 
-atexit.register(_cleanup_browser_on_exit)
+
+def conversation(mic):
+    """One wake-up: keep answering until silence, "goodbye", or too many
+    unusable utterances in a row."""
+    turns, empty, offline_warned = 0, 0, False
+    while not is_shutdown_requested():
+        push_voice_event({"type": "listening_start"})
+        audio = record_utterance(mic)
+        if audio is None:
+            push_voice_event({"type": "listening_end"})
+            print("👁️  Back to standby")
+            return
+        if len(audio) == 0:
+            push_voice_event({"type": "listening_end"})
+            empty += 1
+            if empty >= EMPTY_LIMIT:
+                return
+            continue
+
+        push_voice_event({"type": "transcribing_start"})
+        try:
+            text = transcribe(audio)
+        except Offline:
+            text = None
+            if not offline_warned:
+                speak("I'm offline right now, boss — I can't understand speech without the internet.")
+                mic.drain()
+                offline_warned = True
+        except Exception as e:
+            text = None
+            print(f"[voice] transcription error: {e}")
+        finally:
+            push_voice_event({"type": "listening_end"})
+
+        if not text:
+            empty += 1
+            if empty >= EMPTY_LIMIT:
+                return
+            continue
+        empty = 0
+        print(f"🗣️  You: {text}")
+        push_voice_event({"type": "transcript", "text": text})
+
+        lowered = text.lower()
+        if any(p in lowered for p in GOODBYE_PHRASES):
+            speak("Standing by, boss.")
+            return
+        if any(p in lowered for p in MIC_CHECK_PHRASES):
+            speak("Loud and clear, boss.")
+            mic.drain()
+            continue
+
+        voice._is_processing.set()
+        push_voice_event({"type": "processing_start"})
+        try:
+            response = call_server(text)
+        finally:
+            voice._is_processing.clear()
+            push_voice_event({"type": "processing_end"})
+        set_expecting_confirmation(bool(response.get("expecting_confirmation")))
+        push_voice_event({"type": "reply", "text": response.get("display", "")})
+        speak(response.get("spoken") or response.get("display", ""))
+        mic.drain()
+        turns += 1
+        _maybe_open_dashboard(turns)
 
 
-# ══════════════════════════════════════════
-#   MAIN
-# ══════════════════════════════════════════
+def _single_instance() -> bool:
+    """Two voice processes would fight over the mic (this happened: after
+    restarts, orphaned copies kept running with live mic access)."""
+    if sys.platform != "win32":
+        return True
+    import ctypes
+    kernel32 = ctypes.windll.kernel32
+    kernel32.SetLastError(0)
+    handle = kernel32.CreateMutexW(None, False, "Local\\JarvisVoiceProcess")
+    globals()["_instance_mutex"] = handle  # keep the handle alive for the process lifetime
+    return kernel32.GetLastError() != 183  # ERROR_ALREADY_EXISTS
+
 
 def main():
-    print("\n" + "═"*44)
-    print("   J.A.R.V.I.S — Online")
-    print("═"*44)
-    print("  Say 'Hey Jarvis' → voice mode")
-    print("  Ctrl+C           → shutdown")
-    print("  (type commands in the Electron console, not here — this")
-    print("   terminal is voice-only now, so there's one conversation,")
-    print("   not two out-of-sync ones)")
-    print("─"*44 + "\n")
+    if not _single_instance():
+        print("Another Jarvis voice process is already running — exiting.")
+        return 3
 
-    print("🔌 Waiting for backend (server.py) at " + SERVER_URL + " ...")
-    if not wait_for_server():
-        print("⚠️  Backend not reachable — start server.py first (see run.py). Continuing anyway;")
-        print("    commands will fail until it's up.")
-    else:
-        print("✅ Backend is up.")
+    print("🔌 Waiting for backend at " + SERVER_URL + " ...")
+    print("✅ Backend is up." if wait_for_server() else "⚠️  Backend not reachable yet — will keep trying per request.")
 
+    from core.mic import open_mic
+    from core.wakeword import WakeDetector, THRESHOLD
+    mic = open_mic(should_stop=is_shutdown_requested)
+    detector = WakeDetector()
+    threading.Thread(target=_heartbeat_worker, daemon=True).start()
+    print("👁️  Standby — say 'Hey Jarvis'")
+
+    last_wake = 0.0
     try:
-        init_microphone()
-        # Deliberately NOT starting the keyboard listener / typed-standby
-        # watcher here anymore — this process is voice-only. Typing into
-        # THIS terminal used to run its own independent conversation
-        # (with its own local echo/history) alongside the Electron
-        # frontend's command line, hitting the same backend but showing
-        # two different, out-of-sync views of "the conversation." The
-        # frontend already has a full command box wired to /command, and
-        # every voice turn is bridged into it too (core/voice_bridge.py)
-        # — so the frontend is now the single place to see or type a
-        # conversation; this terminal is just the mic.
-        # Pushed as a 'reply' (not just spoken locally) so this greeting
-        # shows up in the Electron console's log too — previously the
-        # only place "Jarvis online" appeared was this terminal, which
-        # isn't where the user is meant to be watching.
-        push_voice_event({"type": "reply", "text": "Jarvis online. Ready when you are, KK."})
-        speak("Jarvis online. Ready when you are, KK.")
-        start_wakeword_listener(wakeword_conversation)
-        threading.Thread(target=_heartbeat_worker, daemon=True).start()
-        print("\n👁️  Standby — say 'Hey Jarvis'\n")
-
         while not is_shutdown_requested():
-            time.sleep(0.1)
-
+            score = detector.process(mic.read())
+            if score < THRESHOLD or time.time() - last_wake < WAKE_COOLDOWN_S:
+                continue
+            print(f"\n✅ Wake word (score {score:.2f})")
+            push_voice_event({"type": "wake"})
+            speak("Yes boss?")
+            mic.drain()
+            conversation(mic)
+            set_expecting_confirmation(False)
+            detector.reset()
+            mic.drain()
+            last_wake = time.time()
     except KeyboardInterrupt:
-        print("\n\n⚡ Ctrl+C — shutting down Jarvis...")
-
+        pass
     finally:
-        try:
-            speak("Shutting down. Later boss.")
-        except Exception:
-            pass
-        try:
-            from features.web_control import is_browser_open, close_browser
-            if is_browser_open():
-                print("🌐 Closing browser...")
-                close_browser()
-        except Exception as e:
-            print(f"[shutdown] Browser cleanup warning: {e}")
-
-    print("\n👋 Jarvis offline.")
+        request_shutdown()
+        mic.close()
+    print("👋 Jarvis voice offline.")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

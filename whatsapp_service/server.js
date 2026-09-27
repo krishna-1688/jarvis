@@ -18,7 +18,7 @@ app.use(express.json());
 // messages. These are placeholder patterns (no real UPI notifications were
 // available to build from) — replace with whatever your bank/UPI app's
 // actual WhatsApp display name is for better accuracy.
-const JARVIS_BACKEND_URL = process.env.JARVIS_BACKEND_URL || "http://localhost:8000";
+const JARVIS_BACKEND_URL = process.env.JARVIS_BACKEND_URL || "http://127.0.0.1:8000";
 const UPI_SENDER_PATTERNS = (
   process.env.UPI_SENDER_PATTERNS || "HDFC Bank,SBI,ICICI Bank,Axis Bank,Paytm,PhonePe,Google Pay"
 )

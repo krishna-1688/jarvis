@@ -19,8 +19,8 @@ import requests
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-SERVER_URL = "http://localhost:8000"
-WS_URL = "ws://localhost:8000/stream"
+SERVER_URL = "http://127.0.0.1:8000"
+WS_URL = "ws://127.0.0.1:8000/stream"
 
 
 def find_python_processes():

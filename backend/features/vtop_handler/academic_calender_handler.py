@@ -38,7 +38,8 @@ async def get_academic_calender():
 
     """
     academic_calenders = None
-    async with aiohttp.ClientSession() as sess:
+    from .tls import vtop_client_session
+    async with vtop_client_session() as sess:
         async with sess.get(url=VTOP_ACAD_CALENDER_URL) as resp:
             acad_calender_html =  await resp.text()
             academic_calenders = parse_academic_calender(acad_calender_html)

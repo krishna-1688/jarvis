@@ -7,6 +7,8 @@ stores in SQLite, and sends WhatsApp reminders.
 
 import os
 import sys
+import threading
+import time
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import LMS_USERNAME, LMS_PASSWORD, MY_WHATSAPP_NUMBER
@@ -74,7 +76,39 @@ def _sync_once() -> dict:
     return {"assignments": assignments, "new": new_assignments}
 
 
+_LMS_FAILURE_COOLDOWN_S = 5 * 60
+_lms_last_failure_at = 0.0
+_lms_sync_lock = threading.Lock()
+
+
 def fetch_and_sync_lms() -> dict:
+    """Serialized, with a cool-down after a failed login so repeated
+    requests don't hammer Moodle while it's refusing us."""
+    global _lms_last_failure_at
+    if time.time() - _lms_last_failure_at < _LMS_FAILURE_COOLDOWN_S:
+        return {"error": "Session expired, couldn't re-login"}
+    with _lms_sync_lock:
+        result = _fetch_and_sync_lms_uncached()
+    if result.get("error"):
+        _lms_last_failure_at = time.time()
+    return result
+
+
+def _background_lms_sync():
+    if _lms_sync_lock.locked():
+        return
+    def _run():
+        result = fetch_and_sync_lms()
+        if not result.get("error"):
+            try:
+                from core.ws_hub import broadcast
+                broadcast({"type": "data_refreshed", "data_type": "assignments"})
+            except Exception:
+                pass
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _fetch_and_sync_lms_uncached() -> dict:
     """
     Main sync function:
     1. Login to Moodle
@@ -183,7 +217,7 @@ def send_whatsapp_reminder(assignment: dict, tier: str):
 #   PUBLIC FEATURE-RESULT API (used by jarvis.py)
 # ══════════════════════════════════════════
 
-def get_lms_result(query_type: str, on_progress=None) -> FeatureResult:
+def get_lms_result(query_type: str, on_progress=None, allow_live_sync: bool = True) -> FeatureResult:
     """
     query_type: 'assignments' | 'sync'
     on_progress: optional callable(str) for interim voice feedback
@@ -218,7 +252,10 @@ def get_lms_result(query_type: str, on_progress=None) -> FeatureResult:
         except Exception:
             pass
 
-    if not data_fresh:
+    if not data_fresh and not allow_live_sync:
+        # Widget polling path: answer from cache, refresh in the background.
+        _background_lms_sync()
+    elif not data_fresh:
         if on_progress:
             on_progress("Let me check LMS real quick, boss.")
         sync_result = fetch_and_sync_lms()
@@ -236,6 +273,8 @@ def get_lms_result(query_type: str, on_progress=None) -> FeatureResult:
         a      = pending[0]
         spoken = f"One pending assignment — {a['title']} from {a['course_name']}."
     else:
-        spoken = f"You have {len(pending)} pending assignments. Check the terminal for details."
+        nearest = min(pending, key=lambda a: a.get("due_date") or "9999")
+        spoken = (f"You have {len(pending)} pending assignments. The nearest is "
+                  f"{nearest['title']} for {nearest['course_name']}. The full list is on screen.")
 
     return FeatureResult(ok=True, data={"pending": pending}, display=response, spoken=spoken)

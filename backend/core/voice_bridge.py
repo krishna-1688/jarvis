@@ -27,8 +27,12 @@ import threading
 
 import requests
 
-SERVER_URL = "http://localhost:8000"
+# 127.0.0.1, not "localhost": on Windows "localhost" tries IPv6 ::1 first,
+# and uvicorn only listens on IPv4 — every request paid a ~2s refused-
+# connection retry before falling back (measured: 2.05s vs 0.03s).
+SERVER_URL = "http://127.0.0.1:8000"
 _TIMEOUT   = 1.0
+_session   = requests.Session()
 
 _queue = queue.Queue(maxsize=16)
 
@@ -37,7 +41,7 @@ def _worker():
     while True:
         event = _queue.get()
         try:
-            requests.post(f"{SERVER_URL}/internal/voice_event", json=event, timeout=_TIMEOUT)
+            _session.post(f"{SERVER_URL}/internal/voice_event", json=event, timeout=_TIMEOUT)
         except Exception:
             pass
 

@@ -39,6 +39,8 @@ import os
 import threading
 import time
 import asyncio
+import re
+from collections import deque
 from datetime import datetime, timedelta
 
 # Windows' default console codepage (cp1252) can't encode the emoji used
@@ -60,7 +62,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from core.brain import ask_groq
+from core.brain import ask_groq, ask_oneshot, note_feature_exchange, to_spoken
 from core.router import route
 from features.base import FeatureResult
 
@@ -123,24 +125,30 @@ def handle_alias_add(user_input: str, payload: dict) -> FeatureResult:
     from features.vtop import get_alias_add_result
     return get_alias_add_result(user_input, entities=payload)
 
-# H.5: low-confidence Stage 2 classifications land here (see
-# core.router._low_confidence_fallback) instead of silently guessing or
-# dropping into blind chat — a short numbered menu beats a dead end.
-_CLARIFY_MENU = [
-    ("attendance", "your attendance"),
-    ("timetable_today", "today's classes"),
-    ("exams", "your exam schedule"),
-    ("cgpa", "your CGPA"),
-]
+def handle_open_dashboard(user_input: str, payload: dict) -> FeatureResult:
+    from core.dashboard import launch
+    ok, msg = launch()
+    return FeatureResult(ok=ok, data={}, display=msg, spoken=msg if not ok else "Dashboard's coming up, boss.")
 
-def handle_clarify(user_input: str, payload: dict) -> FeatureResult:
-    lines = [f"{i + 1}. {label}" for i, (_, label) in enumerate(_CLARIFY_MENU)]
-    display = "Not sure what you're after — did you mean:\n" + "\n".join(lines) + "\n\nOr just tell me in your own words."
-    spoken = "Not sure what you meant there — could you rephrase, or pick one of the options on screen?"
-    return FeatureResult(
-        ok=False, data={"options": [label for _, label in _CLARIFY_MENU]},
-        display=display, spoken=spoken, error="low_confidence",
-    )
+
+def handle_remember_fact(user_input: str, payload: dict) -> FeatureResult:
+    """"remember that my birthday is May 5" — stored in semantic memory
+    and recalled into chat context when a later question is related."""
+    from core.memory import remember_fact
+    fact = (payload or {}).get("fact") or user_input
+    remember_fact(fact)
+    msg = "Noted, boss. I'll remember that."
+    return FeatureResult(ok=True, data={"fact": fact}, display=msg, spoken=msg)
+
+def handle_recall_facts(user_input: str, payload: dict) -> FeatureResult:
+    from core.memory import list_facts
+    facts = list_facts()
+    if not facts:
+        msg = "You haven't asked me to remember anything yet. Say 'remember that ...' and I will."
+        return FeatureResult(ok=True, data={"facts": []}, display=msg, spoken=msg)
+    display = "Here's what you've asked me to remember:\n" + "\n".join(f"- {f}" for f in facts)
+    spoken = f"You've told me {len(facts)} thing{'s' if len(facts) != 1 else ''}. " + "; ".join(facts[:3])
+    return FeatureResult(ok=True, data={"facts": facts}, display=display, spoken=spoken)
 
 def _handle_timetable(mode: str):
     """Builds a (user_input, payload) handler for a fixed timetable query mode."""
@@ -477,20 +485,23 @@ def handle_lms_sync(user_input: str, payload: dict) -> FeatureResult:
 _pending_whatsapp_confirm = {"data": None}
 
 
+# Whole-word matching: plain substrings made "I don't know" / "not now"
+# count as NO (they contain "no") and "yesterday" count as YES.
+_AFFIRMATIVE_RE = re.compile(
+    r"\b(?:yes|yeah|yep|yup|ya|sure|correct|right|confirm|confirmed|affirmative|ok|okay|"
+    r"send it|go ahead|do it|that's (?:him|her|them|right)|thats (?:him|her|them|right))\b"
+)
+_NEGATIVE_RE = re.compile(
+    r"\b(?:no|nope|nah|cancel|don't|dont|not (?:him|her|them|that one)|wrong|"
+    r"different person|stop|nevermind|never mind|forget it)\b"
+)
+
 def _is_affirmative(text: str) -> bool:
     t = text.lower().strip()
-    return any(w in t for w in [
-        "yes", "yeah", "yep", "yup", "correct", "right",
-        "send it", "go ahead", "confirm", "that's him", "that's her",
-        "thats him", "thats her", "do it"
-    ])
+    return bool(_AFFIRMATIVE_RE.search(t)) and not _NEGATIVE_RE.search(t)
 
 def _is_negative(text: str) -> bool:
-    t = text.lower().strip()
-    return any(w in t for w in [
-        "no", "nope", "cancel", "not him", "not her", "wrong",
-        "different person", "stop", "nevermind", "never mind"
-    ])
+    return bool(_NEGATIVE_RE.search(text.lower().strip()))
 
 
 def handle_pc_confirm_followup(user_input: str) -> FeatureResult | None:
@@ -736,7 +747,7 @@ def handle_web(user_input: str, payload: dict) -> FeatureResult | None:
             return FeatureResult(ok=True, data={"title": title}, display=msg, spoken="Nothing readable on this page boss.")
         prompt  = (f"Summarize this webpage in 2-4 short sentences, spoken style.\n\n"
                    f"Title: {title}\n\nContent:\n{text[:4000]}")
-        summary = ask_groq(prompt, extra_context="", max_tokens_override=200)
+        summary = ask_oneshot(prompt, max_tokens=220, fallback="Couldn't process that page right now.")
         msg = f"📄 {title}\n\n{summary}"
         return FeatureResult(ok=True, data={"title": title, "summary": summary}, display=msg, spoken=summary)
 
@@ -754,7 +765,7 @@ def handle_web(user_input: str, payload: dict) -> FeatureResult | None:
         prompt  = (f"Compare these two pages for '{query}'. Give a short 2-4 sentence comparison.\n\n"
                    f"{site_a}:\n{a_data.get('text','failed')[:2000]}\n\n"
                    f"{site_b}:\n{b_data.get('text','failed')[:2000]}")
-        summary = ask_groq(prompt, extra_context="", max_tokens_override=200)
+        summary = ask_oneshot(prompt, max_tokens=220, fallback="Couldn't process that page right now.")
         msg = f"📊 {site_a} vs {site_b}\n\n{summary}"
         return FeatureResult(
             ok=True, data={"site_a": site_a, "site_b": site_b, "summary": summary},
@@ -813,7 +824,9 @@ INTENT_HANDLERS = {
     "bunk_check":         handle_bunk_check,
     "alias_add":          handle_alias_add,
     "alias_merchant":     handle_alias_merchant,
-    "clarify":            handle_clarify,
+    "remember_fact":      handle_remember_fact,
+    "open_dashboard":     handle_open_dashboard,
+    "recall_facts":       handle_recall_facts,
     "timetable_today":    handle_timetable_today,
     "timetable_tomorrow": handle_timetable_tomorrow,
     "timetable_week":     handle_timetable_week,
@@ -860,6 +873,12 @@ def process(user_input: str) -> dict:
     """Returns a dict matching CommandResponse's fields."""
     from features.pc_control import has_pending_system_action
 
+    user_input = (user_input or "").strip()
+    if not user_input:
+        msg = "I'm listening, boss."
+        return {"ok": True, "display": msg, "spoken": msg, "data": {}, "error": None,
+                "expecting_confirmation": False}
+
     pc_followup = handle_pc_confirm_followup(user_input)
     if pc_followup is not None:
         return {
@@ -890,11 +909,15 @@ def process(user_input: str) -> dict:
     result  = handler(user_input, payload) if handler else None
 
     if result is None:
-        # category == "brain", unregistered, OR a handler (whatsapp/web)
-        # decided this wasn't actually its domain despite the keyword
-        # pre-filter matching — fall back to plain chat either way.
+        # category == "brain", unregistered, OR a handler (whatsapp/web/pc)
+        # decided this wasn't actually its domain — plain chat either way.
+        category = "brain"
         reply  = ask_groq(user_input)
-        result = FeatureResult(ok=True, data={}, display=reply, spoken=reply)
+        result = FeatureResult(ok=True, data={}, display=reply, spoken=to_spoken(reply))
+    else:
+        # So a follow-up like "why is it so low?" is answered with this
+        # feature's answer in view (ask_groq records its own turns).
+        note_feature_exchange(user_input, result.display)
 
     # H.3: record this turn for cross-turn follow-up inheritance (see
     # core/context.py) — payload is always a dict now (Groq's entities,
@@ -1191,6 +1214,11 @@ app.add_middleware(
 
 class CommandRequest(BaseModel):
     text: str
+    # "voice" when jarvis.py sends it — the result is then also pushed to
+    # the frontend over /stream so spoken questions get the same rich,
+    # data-backed reply cards as typed ones (the voice path otherwise only
+    # ever delivered plain reply text to the UI).
+    source: str = "ui"
 
 
 class CommandResponse(BaseModel):
@@ -1202,12 +1230,23 @@ class CommandResponse(BaseModel):
     expecting_confirmation: bool = False
 
 
+def _warm_date_parsing():
+    """dateparser loads its language data on first use — that made the
+    first "remind me to…" of each session take ~6s."""
+    try:
+        from features.tasks import _extract_due
+        _extract_due("warm up on friday at 5pm")
+    except Exception:
+        pass
+
+
 @app.on_event("startup")
 def _on_startup():
     import asyncio
     from core import ws_hub
     ws_hub.set_loop(asyncio.get_event_loop())
     _start_background_workers()
+    threading.Thread(target=_warm_date_parsing, daemon=True).start()
 
 
 @app.on_event("shutdown")
@@ -1220,10 +1259,79 @@ def _on_shutdown():
         pass
 
 
+# Recent turns, so a dashboard opened mid-conversation (e.g. automatically
+# after two voice exchanges) shows the conversation instead of a blank page.
+_conversation_log = deque(maxlen=40)
+_log_lock = threading.Lock()
+
+
+def _log_turn(text: str, source: str, result: dict):
+    with _log_lock:
+        _conversation_log.append({
+            "at": time.time(), "text": text, "via": "voice" if source == "voice" else "text",
+            "ok": result.get("ok"), "display": result.get("display"), "spoken": result.get("spoken"),
+            "data": result.get("data") or {},
+        })
+
+
+@app.get("/conversation/recent")
+def conversation_recent(minutes: int = 30):
+    cutoff = time.time() - minutes * 60
+    with _log_lock:
+        return {"turns": [t for t in _conversation_log if t["at"] >= cutoff]}
+
+
+# Reported by run.py from Windows power notifications. The dashboard only
+# opens by itself when someone could actually see it.
+_device_state = {"lid_open": True, "display_on": True, "on_ac": None, "at": 0.0}
+
+
+class DeviceState(BaseModel):
+    lid_open: bool | None = None
+    display_on: bool | None = None
+    on_ac: bool | None = None
+
+
+@app.post("/internal/device_state")
+def set_device_state(state: DeviceState):
+    for k, v in state.model_dump(exclude_none=True).items():
+        _device_state[k] = v
+    _device_state["at"] = time.time()
+    return _device_state
+
+
+@app.post("/dashboard/open")
+def dashboard_open():
+    from core.dashboard import launch
+    ok, msg = launch()
+    return {"ok": ok, "message": msg}
+
+
+@app.post("/dashboard/auto_open")
+def dashboard_auto_open():
+    """Called by the voice process after two exchanges. Never opens the
+    dashboard onto a closed lid or a dark screen."""
+    from core.dashboard import is_running, launch
+    if not (_device_state["lid_open"] and _device_state["display_on"]):
+        return {"opened": False, "reason": "lid closed or screen off"}
+    if is_running():
+        return {"opened": False, "reason": "already open"}
+    ok, msg = launch()
+    return {"opened": ok, "reason": msg}
+
+
 @app.post("/command", response_model=CommandResponse)
 def command(req: CommandRequest):
     try:
         result = process(req.text)
+        _log_turn(req.text, req.source, result)
+        if req.source == "voice":
+            from core.ws_hub import broadcast
+            broadcast({
+                "type": "voice_result", "text": req.text, "ok": result["ok"],
+                "display": result["display"], "spoken": result["spoken"], "data": result["data"],
+                "expecting_confirmation": result["expecting_confirmation"],
+            })
         return CommandResponse(**result)
     except Exception as e:
         import traceback
@@ -1232,15 +1340,34 @@ def command(req: CommandRequest):
         return CommandResponse(ok=False, display=msg, spoken=msg, data={}, error=str(e))
 
 
+_WHATSAPP_STATUS_TTL_S = 20
+_whatsapp_status_cache = {"at": 0.0, "value": {"ready": False, "error": "checking"}, "refreshing": False}
+
+def _refresh_whatsapp_status():
+    try:
+        from features.whatsapp import get_whatsapp_status
+        value = get_whatsapp_status()
+    except Exception as e:
+        value = {"ready": False, "error": str(e)}
+    _whatsapp_status_cache.update(at=time.time(), value=value, refreshing=False)
+
+def _cached_whatsapp_status() -> dict:
+    """/health is polled by the console every 30s and by jarvis.py at
+    boot. Checking the WhatsApp service inline cost ~2-4s per call when
+    it isn't running (Windows retries refused connections), so the check
+    runs in the background and /health returns the last known value."""
+    if (time.time() - _whatsapp_status_cache["at"] > _WHATSAPP_STATUS_TTL_S
+            and not _whatsapp_status_cache["refreshing"]):
+        _whatsapp_status_cache["refreshing"] = True
+        threading.Thread(target=_refresh_whatsapp_status, daemon=True).start()
+    return _whatsapp_status_cache["value"]
+
+
 @app.get("/health")
 def health():
     from config import GROQ_API_KEY
 
-    try:
-        from features.whatsapp import get_whatsapp_status
-        whatsapp_status = get_whatsapp_status()
-    except Exception as e:
-        whatsapp_status = {"ready": False, "error": str(e)}
+    whatsapp_status = _cached_whatsapp_status()
 
     try:
         from core.memory import get_marks_synced_sems, get_latest_cgpa_summary
@@ -1336,9 +1463,11 @@ def get_exams_data():
 
 @app.get("/assignments")
 def get_assignments_data():
-    """Read-only data feed for the Assignments rack module."""
+    """Read-only data feed for the Assignments rack module. Never blocks
+    on a live LMS login — three widgets poll this every minute, and a
+    stale or failing LMS used to trigger a full scrape on every poll."""
     from features.lms import get_lms_result
-    return get_lms_result("assignments").data
+    return get_lms_result("assignments", allow_live_sync=False).data
 
 
 @app.post("/expense/ingest_upi")
