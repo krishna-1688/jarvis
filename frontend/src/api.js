@@ -19,6 +19,7 @@ export const api = {
   attendance: () => getJSON('/attendance'),
   exams: () => getJSON('/exams'),
   assignments: () => getJSON('/assignments'),
+  conversationRecent: (minutes = 30) => getJSON(`/conversation/recent?minutes=${minutes}`),
   command: async (text) => {
     const res = await fetch(`${BASE_URL}/command`, {
       method: 'POST',

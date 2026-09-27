@@ -13,6 +13,7 @@
     "electron:build": "vite build && electron ."
   },
   "dependencies": {
+    "motion": "^13.4.4",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "react-grid-layout": "^2.2.3"

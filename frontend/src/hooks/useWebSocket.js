@@ -57,6 +57,15 @@ function ensureConnected() {
   if (!USE_MOCK && !ws && !retryTimer) connect();
 }
 
+/** Non-hook subscription for module-level stores (orbit/store.js).
+ * Returns an unsubscribe function. */
+export function subscribeWebSocket(fn) {
+  if (USE_MOCK) return () => {};
+  subscribers.add(fn);
+  ensureConnected();
+  return () => subscribers.delete(fn);
+}
+
 /** Subscribes to every parsed JSON frame on the shared socket (including
  * {"type":"ping"} — callers filter for what they care about). No-op
  * while USE_MOCK is true. */

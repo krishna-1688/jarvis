@@ -1,9 +1,17 @@
-const { app, BrowserWindow, globalShortcut, ipcMain } = require('electron');
+const { app, BrowserWindow, globalShortcut, ipcMain, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
-const isDev  = !app.isPackaged;
-const DEV_URL = process.env.ELECTRON_START_URL || 'http://localhost:5173';
+// Dev (npm run electron) sets ELECTRON_START_URL and uses the Vite server;
+// otherwise the prebuilt dist/ is loaded, which is how the backend's
+// "open dashboard" and run.py's Ctrl+J start it — no dev server needed.
+const DEV_URL = process.env.ELECTRON_START_URL;
+const isDev = Boolean(DEV_URL);
+
+// One dashboard at a time: a second launch just focuses the open window.
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+}
 
 let consoleWin = null;
 
@@ -23,7 +31,7 @@ function createConsoleWindow() {
     minHeight: 600,
     frame: false,
     show: false,
-    backgroundColor: '#E8E6E1',
+    backgroundColor: '#04050A',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -34,25 +42,20 @@ function createConsoleWindow() {
   loadWindow(consoleWin, 'console');
   consoleWin.once('ready-to-show', () => consoleWin.show());
 
-  // Hide (don't destroy) on close so Ctrl+J can bring it straight back
-  // without a reload — the console holds live layout/log state.
-  consoleWin.on('close', (e) => {
-    if (!app.isQuitting) {
-      e.preventDefault();
-      consoleWin.hide();
-    }
-  });
+  // Closing the window exits the app. Hiding it kept Chromium resident
+  // (~370 MB measured) all day for a window that's rarely open; the
+  // conversation is restored from the backend on the next open instead.
+  consoleWin.on('closed', () => { consoleWin = null; });
 }
 
-function toggleConsole() {
+function focusConsole() {
   if (!consoleWin) return;
-  if (consoleWin.isVisible() && consoleWin.isFocused()) {
-    consoleWin.hide();
-  } else {
-    consoleWin.show();
-    consoleWin.focus();
-  }
+  if (consoleWin.isMinimized()) consoleWin.restore();
+  consoleWin.show();
+  consoleWin.focus();
 }
+
+app.on('second-instance', focusConsole);
 
 function shutdownApp() {
   app.isQuitting = true;
@@ -61,10 +64,8 @@ function shutdownApp() {
 
 app.whenReady().then(() => {
   createConsoleWindow();
-  globalShortcut.register('CommandOrControl+J', toggleConsole);
-  // Full app shutdown — separate from Ctrl+J (which just hides/shows
-  // the console) and from the close button (which also just hides it,
-  // per the close handler above, to preserve live layout/log state).
+  // Ctrl+J is owned by run.py (it must work while this app isn't running);
+  // Ctrl+Shift+Q closes the dashboard from anywhere while it is open.
   globalShortcut.register('CommandOrControl+Shift+Q', shutdownApp);
 });
 
@@ -79,8 +80,14 @@ app.on('window-all-closed', () => {
 ipcMain.handle('window-control', (_event, { action }) => {
   if (!consoleWin) return;
   if (action === 'minimize') consoleWin.minimize();
-  if (action === 'close') consoleWin.hide();
+  if (action === 'close') consoleWin.close();
   if (action === 'shutdown') shutdownApp();
+});
+
+// LMS/assignment links open in the system browser, never inside the app
+// window, and only for http(s) URLs.
+ipcMain.handle('open-external', (_event, url) => {
+  if (typeof url === 'string' && /^https?:\/\//i.test(url)) shell.openExternal(url);
 });
 
 ipcMain.handle('open-console', () => {
