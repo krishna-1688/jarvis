@@ -67,7 +67,10 @@ def _extract_due(text: str) -> tuple[str | None, str]:
         remaining = re.sub(r'\bby\b\s*$', '', remaining, flags=re.IGNORECASE).strip(" ,.")
         return when.isoformat(), remaining
 
-    matches = dateparser.search.search_dates(text, settings=_DATE_SETTINGS)
+    # English only: with language auto-detection "do" parsed as Portuguese
+    # "domingo" (Sunday) and "pay" as a date, so "add buy milk to my to do
+    # list" was saved "due Sunday".
+    matches = dateparser.search.search_dates(text, languages=["en"], settings=_DATE_SETTINGS)
     if not matches:
         return None, text
     phrase, when = matches[0]
@@ -88,12 +91,32 @@ def _fmt_due(due_at: str | None) -> str:
     return dt.strftime("%A %d %b")
 
 
-def add(raw_text: str, on_progress=None) -> FeatureResult:
+# What's left after stripping "remind me to" when the user never said
+# what to do. The old fallback saved the whole sentence as the title, which
+# is how "Remind me to do" and "mark Remind me to as ne" became tasks.
+_EMPTY_TITLES = {"", "to", "do", "to do", "it", "that", "this", "something", "me", "remind me", "remind me to"}
+
+
+def _ask_what() -> FeatureResult:
+    msg = "Sure, what should I remind you to do?"
+    return FeatureResult(ok=False, data={}, display=msg, spoken=msg, error="no_title")
+
+
+def add(raw_text: str, on_progress=None, title: str | None = None, due: str | None = None) -> FeatureResult:
+    """`title`/`due` come from the classifier when it understood the
+    request ("add buy milk to my list" -> title "buy milk"); otherwise the
+    raw sentence is parsed. Priority and tag always come from the sentence."""
     text = _LEAD_INS.sub("", raw_text.strip())
     priority, text = _extract_priority(text)
     tag, text = _extract_tag(text)
-    due_at, text = _extract_due(text)
-    title = text.strip(" ,.") or raw_text.strip()
+    if title:
+        due_at = _extract_due(due)[0] if due else _extract_due(raw_text)[0]
+        title = _LEAD_INS.sub("", title.strip()).strip(" ,.")
+    else:
+        due_at, text = _extract_due(text)
+        title = text.strip(" ,.")
+    if title.lower() in _EMPTY_TITLES:
+        return _ask_what()
 
     task_id = add_task(title, due_at=due_at, priority=priority, tag=tag)
     task = get_task(task_id)
@@ -164,6 +187,18 @@ def _resolve_one(query: str) -> tuple[dict | None, list, str | None]:
     return candidates[0], candidates, None
 
 
+def complete_all(on_progress=None) -> FeatureResult:
+    tasks = list_tasks(status="open")
+    if not tasks:
+        msg = "You don't have any open tasks."
+        return FeatureResult(ok=True, data={"tasks": []}, display=msg, spoken=msg)
+    for t in tasks:
+        _complete_task_row(t["id"])
+    n = len(tasks)
+    msg = f"Done — marked all {n} task{'s' if n != 1 else ''} as completed."
+    return FeatureResult(ok=True, data={"completed": tasks}, display=msg, spoken=msg)
+
+
 def complete_by_query(query: str, on_progress=None) -> FeatureResult:
     task, candidates, err = _resolve_one(query)
     if err:
@@ -208,8 +243,9 @@ def get_task_add_result(user_input: str, entities: dict = None, on_progress=None
 
 
 def _get_task_add_result(user_input: str, entities: dict = None, on_progress=None) -> FeatureResult:
-    raw_text = (entities or {}).get("raw_text") or user_input
-    return add(raw_text, on_progress=on_progress)
+    entities = entities or {}
+    raw_text = entities.get("raw_text") or user_input
+    return add(raw_text, on_progress=on_progress, title=entities.get("title"), due=entities.get("due"))
 
 
 def get_task_list_result(user_input: str, entities: dict = None, on_progress=None) -> FeatureResult:
@@ -222,7 +258,10 @@ def get_task_today_result(user_input: str, entities: dict = None, on_progress=No
 
 
 def get_task_complete_result(user_input: str, entities: dict = None, on_progress=None) -> FeatureResult:
-    query = (entities or {}).get("query") or user_input
+    entities = entities or {}
+    if entities.get("all") is True or str(entities.get("all")).lower() == "true":
+        return complete_all(on_progress=on_progress)
+    query = entities.get("query") or user_input
     return complete_by_query(query, on_progress=on_progress)
 
 

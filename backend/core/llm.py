@@ -39,7 +39,9 @@ _ROLE_MODELS = {
 _cooldown_until: dict = {}
 _cooldown_lock = threading.Lock()
 
-_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+# Reasoning some models emit before the answer: <think> (qwen) and
+# <thought> (Gemma), closed or cut off by max_tokens.
+_THINK_RE = re.compile(r"<(think|thought)>.*?(?:</\1>|$)", re.DOTALL | re.IGNORECASE)
 _JSON_OBJ_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 # gpt-oss spends part of max_tokens on hidden reasoning before it writes
@@ -112,6 +114,7 @@ def _model_params(model: str, max_tokens: int) -> dict:
 # caps typically clear in 2-6 s), waiting once beats answering "give me a
 # sec" — measured: most cooldowns in a heavy test run were 2-6 s.
 SHORT_WAIT_MAX_S = 6.0
+SLOW_CALL_S = 5.0
 
 
 def shortest_cooldown(role: str) -> float:
@@ -121,42 +124,72 @@ def shortest_cooldown(role: str) -> float:
     return max(0.0, min(waits)) if waits else 0.0
 
 
+def active_provider(role: str = "chat") -> str:
+    """'groq' / 'gemini' for whichever provider the next call would use,
+    or 'none' while every model in the chain is cooling down."""
+    for model in _ROLE_MODELS[role]:
+        if not _in_cooldown(model):
+            return "gemini" if model.startswith("gemini:") else "groq"
+    return "none"
+
+
 def complete(messages: list, *, role: str = "chat", max_tokens: int = 300,
-             temperature: float = 0.4, json_mode: bool = False) -> str:
+             temperature: float = 0.4, json_mode: bool = False, deadline_s: float | None = None) -> str:
     """Returns the model's text reply. Raises LLMUnavailable only when
     every model in the role's chain failed (after one short wait if they
-    were all just briefly rate-limited)."""
+    were all just briefly rate-limited).
+
+    deadline_s caps the whole call, fallbacks and waits included. Intent
+    routing uses it: measured, a chain of rate-limited Groq models plus an
+    overloaded Gemini once took 16.7 s to give up — the caller has a good
+    offline answer ready and should use it instead of making KK wait."""
+    deadline = time.monotonic() + deadline_s if deadline_s else None
     try:
-        return _complete_once(messages, role, max_tokens, temperature, json_mode)
+        return _complete_once(messages, role, max_tokens, temperature, json_mode, deadline)
     except LLMUnavailable:
         wait = shortest_cooldown(role)
-        if 0 < wait <= SHORT_WAIT_MAX_S:
+        room = (deadline - time.monotonic()) if deadline else float("inf")
+        if 0 < wait <= SHORT_WAIT_MAX_S and wait + 1.0 < room:
             time.sleep(wait + 0.2)
-            return _complete_once(messages, role, max_tokens, temperature, json_mode)
+            return _complete_once(messages, role, max_tokens, temperature, json_mode, deadline)
         raise
 
 
-def _complete_once(messages, role, max_tokens, temperature, json_mode) -> str:
+def _complete_once(messages, role, max_tokens, temperature, json_mode, deadline=None) -> str:
     last_error = "no model configured"
     for model in _ROLE_MODELS[role]:
         if _in_cooldown(model):
             last_error = f"{model} cooling down"
             continue
+        if deadline is not None and deadline - time.monotonic() < 0.5:
+            last_error = "out of time"
+            break
+        call_timeout = min(12.0, deadline - time.monotonic()) if deadline is not None else None
         kwargs = _model_params(model, max_tokens)
         if json_mode:
             kwargs["response_format"] = {"type": "json_object"}
+        started = time.monotonic()
         try:
             if model.startswith("gemini:"):
-                content = _gemini_create(model[len("gemini:"):], messages, temperature, kwargs)
+                content = _gemini_create(model[len("gemini:"):], messages, temperature, kwargs, call_timeout)
             else:
+                extra = {"timeout": call_timeout} if call_timeout else {}
                 response = _client.chat.completions.create(
-                    model=model, messages=messages, temperature=temperature, **kwargs,
+                    model=model, messages=messages, temperature=temperature, **kwargs, **extra,
                 )
                 content = response.choices[0].message.content
             text = _THINK_RE.sub("", content or "").strip()
+            took = time.monotonic() - started
+            if took > SLOW_CALL_S:
+                print(f"[llm] {model} slow: {took:.1f}s ({role})")
             if text:
                 return text
             last_error = f"{model} returned empty content"
+        except (groq.APITimeoutError, httpx.TimeoutException) as e:
+            # A hung model would otherwise stall every turn for the full
+            # timeout; rest it briefly so the chain moves straight on.
+            _cool_down(model, 60, f"timed out after {time.monotonic() - started:.0f}s")
+            last_error = str(e) or "timeout"
         except _GeminiError as e:
             if e.status == 429:
                 _cool_down(model, _retry_after(e), "rate limited")
@@ -176,32 +209,45 @@ def _complete_once(messages, role, max_tokens, temperature, json_mode) -> str:
             if "decommission" in msg or "model_not_found" in msg or "does not exist" in msg:
                 _cool_down(model, 3600, "model retired")
             last_error = str(e)
-        except (groq.APITimeoutError, groq.APIConnectionError) as e:
+        except groq.APIConnectionError as e:
             last_error = str(e)
         except Exception as e:
             last_error = str(e)
     raise LLMUnavailable(last_error)
 
 
-def _gemini_create(model: str, messages: list, temperature: float, kwargs: dict) -> str:
+def _gemini_create(model: str, messages: list, temperature: float, kwargs: dict, timeout: float | None = None) -> str:
     global _gemini_http
     if not GEMINI_API_KEY:
         raise _GeminiError(401, "GEMINI_API_KEY not set")
     if _gemini_http is None:
-        _gemini_http = httpx.Client(timeout=15.0, headers={"Authorization": f"Bearer {GEMINI_API_KEY}"})
+        # Lite models answer in 2-3 s; one still open at 6 s has hung (seen
+        # on image requests) — fail over to the next model instead.
+        _gemini_http = httpx.Client(timeout=httpx.Timeout(6.0, connect=3.0),
+                                    headers={"Authorization": f"Bearer {GEMINI_API_KEY}"})
+    extra = {"timeout": httpx.Timeout(min(6.0, timeout), connect=min(3.0, timeout))} if timeout else {}
     r = _gemini_http.post(_GEMINI_URL, json={"model": model, "messages": messages,
-                                             "temperature": temperature, **kwargs})
+                                             "temperature": temperature, **kwargs}, **extra)
     if r.status_code != 200:
         raise _GeminiError(r.status_code, r.text[:400])
     return r.json()["choices"][0]["message"].get("content") or ""
 
 
-def complete_json(messages: list, *, role: str = "classifier", max_tokens: int = 200) -> dict:
+def complete_json(messages: list, *, role: str = "classifier", max_tokens: int = 200,
+                  deadline_s: float | None = None) -> dict:
     """Like complete(), but parses a JSON object out of the reply."""
-    raw = complete(messages, role=role, max_tokens=max_tokens, temperature=0, json_mode=True)
+    raw = complete(messages, role=role, max_tokens=max_tokens, temperature=0, json_mode=True, deadline_s=deadline_s)
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
+        # Models without JSON mode may wrap the object in prose; take the
+        # last {...} that parses.
+        for start in [i for i, ch in enumerate(raw) if ch == "{"][::-1]:
+            end = raw.rfind("}")
+            try:
+                return json.loads(raw[start:end + 1])
+            except json.JSONDecodeError:
+                continue
         m = _JSON_OBJ_RE.search(raw)
         if m:
             return json.loads(m.group(0))

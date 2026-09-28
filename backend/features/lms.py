@@ -49,7 +49,12 @@ def _sync_once() -> dict:
                 print(f"Status check failed for {a['title']}: {e}")
                 a["status"] = "unknown"
 
-    new_assignments = save_lms_assignments(assignments) if assignments else []
+    # Always upsert (even with an empty list) so the sync log gets a row —
+    # otherwise a course with 0 current LMS assignments never records a
+    # sync time, get_lms_last_sync() stays None forever, and every single
+    # /assignments poll decides data is stale and kicks off another
+    # background sync (the repeated "LMS sync" lines at startup).
+    new_assignments = save_lms_assignments(assignments)
 
     # Moodle's "upcoming" view stops listing an assignment once it's
     # submitted (or once its due date passes) — so anything we still

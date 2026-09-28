@@ -795,7 +795,23 @@ def handle_web(user_input: str, payload: dict) -> FeatureResult | None:
     # See handle_whatsapp's identical comment — payload is now typically
     # {} for this intent, user_input is the real source.
     raw_text  = payload.get("raw_text") or user_input
-    extracted = extract_web_intent(raw_text)
+
+    # "open youtube" names its target outright: no model needed. Measured
+    # in a live session: with every model rate limited, "Open YouTube" was
+    # understood but never opened because this extraction step failed.
+    from core.router import _SITE_RE, _WEB_OPEN_RE, _strip_lead_filler
+    bare = _strip_lead_filler(raw_text.lower()).strip(" .!?")
+    verb = _WEB_OPEN_RE.match(bare)
+    site_hit = _SITE_RE.search(bare) if verb else None
+    direct_site = site_hit.group(0) if site_hit and site_hit.start() == verb.end() else None
+
+    if direct_site and bare[site_hit.end():].strip(" .!?,") in ("", "please", "for me", "now", "quickly"):
+        extracted = {"action": "open", "site": direct_site}
+    else:
+        extracted = extract_web_intent(raw_text)
+        if not extracted and direct_site:
+            # Model unreachable, but the sentence starts with "open <site>".
+            extracted = {"action": "open", "site": direct_site}
 
     if not extracted:
         return None
@@ -1413,6 +1429,21 @@ def _log_turn(text: str, source: str, result: dict):
         })
 
 
+@app.get("/memory/graph")
+def memory_graph(limit: int = 42):
+    from core.graph import get_graph
+    return get_graph().snapshot(max(5, min(limit, 80)))
+
+
+@app.get("/memory/node/{node_id}")
+def memory_node(node_id: int):
+    from core.graph import get_graph
+    detail = get_graph().node_detail(node_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="not in memory")
+    return detail
+
+
 @app.get("/conversation/recent")
 def conversation_recent(minutes: int = 30):
     cutoff = time.time() - minutes * 60
@@ -1540,9 +1571,12 @@ def health():
     except Exception as e:
         vtop_status = {"has_data": False, "error": str(e)}
 
+    from core.llm import active_provider
+
     return {
         "status": "ok",
         "groq_key_present": bool(GROQ_API_KEY),
+        "ai": {"provider": active_provider("chat")},
         "whatsapp": whatsapp_status,
         "vtop": vtop_status,
     }
@@ -1772,7 +1806,15 @@ async def stream_endpoint(websocket: WebSocket):
     ws_hub.register(websocket)
     try:
         while True:
-            await websocket.send_json({"type": "ping"})
+            try:
+                await websocket.send_json({"type": "ping"})
+            except (WebSocketDisconnect, RuntimeError):
+                # A closed-window disconnect can surface here as a plain
+                # RuntimeError ("Cannot call send once a close message has
+                # been sent") rather than WebSocketDisconnect, depending on
+                # exactly when the close frame and this sleeping send race —
+                # either way the socket is gone, so just stop.
+                break
             await asyncio.sleep(10)
     except WebSocketDisconnect:
         pass

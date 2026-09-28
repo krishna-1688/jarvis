@@ -1,30 +1,29 @@
 """
-router.py — routing for Jarvis.
+router.py — routing for Jarvis. Meaning first, keywords last.
 
-Stage 1 (fast_path_route) is deterministic and deliberately
-HIGH-PRECISION: it only claims an utterance when the phrasing is an
-unambiguous command ("pause spotify", "remind me to ...", "what's my
-attendance"). Every matcher uses whole-word matching (_has_any), and
-open-ended verbs — open/close/find/tell/text/search — only count when
-they START the sentence.
+Stage 1 (reflex_route) is tiny on purpose: safety rules (shutdown) and
+commands whose phrasing leaves nothing to interpret — exact data phrases
+("what's my attendance"), "open dashboard", Spotify transport, the screen,
+memory commands, small talk / impersonal knowledge questions, "open
+<known website>", anchored PC commands. They answer instantly, no model.
 
-That precision is the whole point. The previous version matched bare
-substrings anywhere in the sentence: "mark" inside "market", "fat" inside
-"father", "os" inside "most", "cpu" inside "explain cpu scheduling",
-"tell " inside "tell me a joke", "close" inside "how close am I to 75%".
-A Stage 1 false positive is the worst failure this app has — the
-question gets answered by the wrong feature (a CPU-usage readout, a
-WhatsApp prompt, an app getting killed). A Stage 1 miss only costs one
-fast classifier call.
+Stage 2 (extract_general_intent_groq) understands everything else from
+its MEANING, and extracts what the feature needs (task title and due
+date, "all" tasks, merchant, course...) so features act on that instead
+of re-parsing the sentence with more regexes. It runs through core.llm's
+model fallback chain under a 5 s budget.
 
-Stage 1.5 (in fast_path_route): small talk and impersonal knowledge
-questions ("what is a deadlock", "tell me a joke") go straight to the
-brain — no classifier call, and no way to be mistaken for a command.
+Why: keyword rules decided most requests before, and misfired on any
+phrasing they weren't written for. Measured on an 81-request eval plus 20
+held-out paraphrases: "mark my words" / "Mark Zuckerberg" / "mark has
+completed for all tasks" all answered with exam marks, "add buy milk to
+my to do list" listed tasks, "sync my LMS" only listed assignments.
 
-Stage 2 (extract_general_intent_groq) classifies everything else against
-GROQ_INTENTS through core.llm, which walks a fallback chain of models. If
-every model is down, _offline_fallback handles obvious data questions
-and sends the rest to chat.
+The keyword rules (fast_path_route) remain as the OFFLINE fallback, used
+only when every model is unreachable or out of time, so a flaky
+connection still gets a useful answer. They were tightened so that when
+they're wrong they fall to plain chat rather than pulling the wrong data.
+Anything they can't place goes to _offline_fallback, then chat.
 
 Marks queries stay 100% offline (SQLite) by default; VTOP is only
 touched when the user explicitly asks to refresh/sync (vtop_fetch_marks
@@ -390,8 +389,12 @@ def _looks_like_data_question(text: str) -> bool:
     return _fuzzy_any(text, VTOP_DATA_SIGNAL_WORDS)
 
 
+# Bare "mark" is left out on purpose: "mark my words", "Mark Zuckerberg"
+# and "mark the gym task done" all used to read as a marks request.
+# Singular "mark" only counts in _MY_MARK_RE's forms ("my mark in DAA").
+_MY_MARK_RE = re.compile(r"\b(?:my|the)\s+mark\b(?!\s+(?:as|it|this|that)\b)|\bmark\s+(?:in|for|of)\b")
 MARKS_KEYWORDS = [
-    "marks", "mark", "cat1 marks", "cat2 marks", "fat marks",
+    "marks", "cat1 marks", "cat2 marks", "fat marks",
     "final assessment", "continuous assessment", "internal marks", "semester marks",
     "assignment mark", "assignment marks", "digital assignment", "periodic assessment",
     "lab mark", "lab marks", "lab assessment", "what did i get", "how much did i score",
@@ -407,7 +410,9 @@ _SCORE_NON_MARKS_GUARDS = ["cgpa", "cgp", "gpa", "overall"]
 
 def has_marks_keyword(text: str) -> bool:
     t = text.lower()
-    if _fuzzy_any(t, MARKS_KEYWORDS):
+    # Exact words only: fuzzy matching read "mark" as a typo of "marks",
+    # which let "mark my words" / "Mark Zuckerberg" back in.
+    if _has_any(t, MARKS_KEYWORDS) or _MY_MARK_RE.search(t):
         return True
     if _has_any(t, _CAT_FAT_ONLY_KEYWORDS) and not _has_any(t, _CAT_FAT_NON_MARKS_GUARDS):
         return True
@@ -474,9 +479,10 @@ TASK_LIST_PHRASES = [
 TASK_TODAY_PHRASES = [
     "tasks today", "my tasks today", "tasks due today", "what tasks are due",
 ]
-TASK_COMPLETE_VERBS = ["complete", "finished", "finish"]
-TASK_DROP_VERBS     = ["drop", "remove", "cancel", "delete"]
-_TASK_FILLER_WORDS  = {"the", "a", "an", "my", "task", "please"}
+TASK_COMPLETE_VERBS = ["complete", "completed", "finished", "finish", "done", "tick"]
+TASK_DROP_VERBS     = ["drop", "remove", "cancel", "delete", "clear"]
+_TASK_FILLER_WORDS  = {"the", "a", "an", "my", "task", "tasks", "please", "mark", "as", "has", "off", "for", "is"}
+_ALL_TASKS_RE = re.compile(r"\b(?:all|every|each)\b(?:\s+(?:of\s+)?(?:my|the))?\s+tasks?\b")
 
 def _mark_as_done_query(text: str) -> str | None:
     t = text.lower()
@@ -492,13 +498,29 @@ def _mark_as_done_query(text: str) -> str | None:
 def _verb_based_query(text: str, verbs: list, marker_word: str) -> str | None:
     words   = text.split()
     lowered = [w.lower().strip(",.?!") for w in words]
-    if not any(v in lowered for v in verbs) or marker_word not in lowered:
+    if not any(v in lowered for v in verbs) or not {marker_word, marker_word + "s"} & set(lowered):
         return None
     kept = [w for w, lw in zip(words, lowered) if lw not in verbs and lw not in _TASK_FILLER_WORDS and lw != marker_word]
     return " ".join(kept).strip(" ,.")
 
+_ADD_TO_LIST_RE = re.compile(
+    r"^(?:please\s+)?(?:add|put)\s+(.+?)\s+(?:to|on|in|onto)\s+(?:my\s+|the\s+)?(?:to[- ]?do|todo|task|tasks)(?:\s+list)?[.!]?$"
+)
+
+
 def detect_task_intent(text: str) -> tuple | None:
     t = text.lower()
+
+    # "add buy milk to my to do list" — before the list phrases, which it
+    # also contains.
+    m = _ADD_TO_LIST_RE.match(_strip_lead_filler(t))
+    if m:
+        return "task_add", {"raw_text": text, "title": m.group(1)}
+
+    # "tick off all my tasks" also contains the list phrase "my tasks".
+    if _ALL_TASKS_RE.search(t) and (_verb_based_query(text, TASK_COMPLETE_VERBS + TASK_DROP_VERBS + ["off"], "task") is not None
+                                    or _mark_as_done_query(text) is not None):
+        return "task_complete", {"all": True}
 
     if _has_any(t, TASK_TODAY_PHRASES):
         return "task_today", {}
@@ -511,15 +533,22 @@ def detect_task_intent(text: str) -> tuple | None:
         return "task_add", {"raw_text": text}
 
     mark_query = _mark_as_done_query(text)
+    complete_query = _verb_based_query(text, TASK_COMPLETE_VERBS, "task")
+    if (mark_query is not None or complete_query is not None) and _ALL_TASKS_RE.search(t):
+        return "task_complete", {"all": True}
+
     if mark_query is not None:
         return "task_complete", {"query": mark_query or text}
 
-    complete_query = _verb_based_query(text, TASK_COMPLETE_VERBS, "task")
     if complete_query is not None:
         return "task_complete", {"query": complete_query or text}
 
     drop_query = _verb_based_query(text, TASK_DROP_VERBS, "task")
     if drop_query is not None:
+        # "clear all my tasks": completing keeps the history; deleting
+        # everything on one misheard phrase would not be undoable.
+        if _ALL_TASKS_RE.search(t):
+            return "task_complete", {"all": True}
         return "task_drop", {"query": drop_query or text}
 
     return None
@@ -778,12 +807,58 @@ def detect_simple_data_query(text: str) -> tuple | None:
 #   STAGE 1
 # ══════════════════════════════════════════
 
+def reflex_route(text: str) -> tuple | None:
+    """
+    Stage 1 — the only keyword routing that runs while the classifier is
+    reachable. It claims just commands whose phrasing leaves nothing to
+    interpret (and safety rules), so they answer instantly with no model
+    call: shutdown, exact data phrases ("what's my attendance"), opening
+    the dashboard, Spotify transport, the screen, memory commands, small
+    talk / impersonal knowledge questions, and anchored PC commands.
+
+    Everything else — tasks, schedule, focus, money, marks, LMS, messages,
+    browsing — is understood by the classifier from its meaning. Keyword
+    rules for those guessed from single words and misfired on phrasings
+    they weren't written for (measured: "mark my words" and "mark has
+    completed for all tasks" both answered with exam marks, "add buy milk
+    to my to do list" listed tasks instead of adding one, "sync my LMS"
+    just listed assignments). Those rules live on in fast_path_route,
+    used only when every model is unreachable.
+    """
+    t = text.lower()
+    if is_shutdown_request(t):
+        return "system_shutdown", {}
+    if is_cancel_shutdown_request(t):
+        return "pc", {}
+    simple = detect_simple_data_query(text)
+    if simple:
+        return simple
+    if _DASHBOARD_RE.match(_strip_lead_filler(t).rstrip("?.! ")):
+        return "open_dashboard", {}
+    for detector in (detect_spotify_intent, detect_screen_intent, detect_memory_intent):
+        match = detector(text)
+        if match:
+            return match
+    if _is_general_chat(text):
+        return "brain", None
+    # "open youtube" / "go to github": a named website, never a desktop app.
+    bare = _strip_lead_filler(t)
+    if _WEB_OPEN_RE.match(bare) and _SITE_RE.search(bare):
+        return "web", {"raw_text": text}
+    if detect_pc_request(text) or detect_app_command(text):
+        result = handle_pc_command(t)
+        if result:
+            return "pc", result
+    return None
+
+
 def fast_path_route(text: str) -> tuple | None:
     """
-    Stage 1 — deterministic routing, checked in an order tuned to avoid
-    one feature's trigger swallowing another's sentence. Returns
-    (category, payload), ("brain", None) for plain chat, or None to let
-    Stage 2 decide.
+    Offline fallback — used only when every classifier model is
+    unreachable (see route()). Deterministic keyword routing, checked in
+    an order tuned to avoid one feature's trigger swallowing another's
+    sentence. Returns (category, payload), ("brain", None) for plain chat,
+    or None.
     """
     t = text.lower()
 
@@ -1153,11 +1228,11 @@ GROQ_INTENTS = {
     "grade_target":     "mark needed in a course/assessment for a target grade",
     "best_case_cgpa":   "CGPA if EVERY course this sem got the same grade",
     "overall_cgpa_target": "grade needed this sem to reach a target overall CGPA",
-    "task_add":         "new personal reminder/to-do",
+    "task_add":         "ADD a personal reminder/to-do (\"remind me to\", \"add X to my list\")",
     "task_list":        "list my open personal tasks",
     "task_today":       "personal tasks due today/overdue",
-    "task_complete":    "mark a personal task done",
-    "task_drop":        "remove a personal task",
+    "task_complete":    "mark one of my to-do tasks, or all of them, as done (\"mark X as done\" is THIS, never marks)",
+    "task_drop":        "delete/remove a personal task",
     "schedule_add":     "block time for an activity at a time",
     "schedule_today":   "today's plan: classes + blocks",
     "schedule_tomorrow": "tomorrow's plan",
@@ -1169,22 +1244,22 @@ GROQ_INTENTS = {
     "focus_stop":       "end the focus session",
     "focus_status":     "is a focus session running",
     "focus_stats":      "how much I studied recently",
-    "expense_add":      "log money I spent",
-    "expense_summary":  "how much I spent over a period",
-    "expense_search":   "find past expenses by merchant",
+    "expense_add":      "RECORD a payment I just made (\"spent 200 on lunch\", \"paid 50 for an auto\")",
+    "expense_summary":  "ASK my total spending over a period, no specific merchant",
+    "expense_search":   "ASK what I spent at/on a specific merchant, place or item (swiggy, uber, food)",
     "alias_add":        "teach a course nickname",
     "alias_merchant":   "name an opaque UPI VPA",
     "remember_fact":    "asks Jarvis to remember a personal fact",
     "system_shutdown":  "shut down/exit Jarvis itself",
     "spotify":          "Spotify playback: play/open/pause/resume/skip/volume/now playing",
-    "pc":               "control THIS PC: volume, mute, screenshot, brightness, open/close apps, battery/CPU/RAM/disk, clipboard, windows, shutdown/restart/sleep the PC",
+    "pc":               "control THIS PC: volume, mute, screenshot, brightness, open/close DESKTOP APPS (chrome, vs code, notepad), battery/CPU/RAM/disk, clipboard, windows, shutdown/restart/sleep the PC",
     "screen":           "look at KK's screen right now: what's on it, read/explain/summarise something visible on it",
-    "web":              "browse: open/search a website, compare sites, summarize/scroll/click the open page",
+    "web":              "browse: open/search a WEBSITE (youtube, google, amazon, gmail), compare sites, summarize/scroll/click the open page",
     "whatsapp":         "send a WhatsApp message to someone",
-    "vtop_marks":       "my assessment marks (CAT/FAT/assignment) in a course",
+    "vtop_marks":       "my scores in assessments (CAT/FAT/quiz marks) — not \"mark X as done\", not \"mark my words\"",
     "vtop_fetch_marks": "refresh marks live from VTOP",
-    "lms_assignments":  "my pending LMS/Moodle assignments and deadlines",
-    "lms_sync":         "refresh assignments from LMS",
+    "lms_assignments":  "my pending college LMS/Moodle assignments and their deadlines",
+    "lms_sync":         "refresh/sync/update assignments from LMS right now",
     "daily_brief":      "the daily/morning brief",
     "chat":             "anything else: conversation, jokes, opinions, advice, general or CS/academic knowledge questions",
 }
@@ -1192,6 +1267,9 @@ GROQ_INTENTS = {
 EXTRACTION_PROMPT = """Classify a voice-assistant command for a VIT student (KK) into exactly ONE intent.
 Pick a feature intent only when the user wants THEIR OWN data or an ACTION done. Questions about concepts,
 how things work, advice, jokes and small talk are "chat" — even if they mention CPUs, memory, exams, marks or apps.
+Judge the MEANING, not keywords: speech-to-text mishears words ("mark has completed" = "mark as completed",
+"that's all my assignments" = "what are all my assignments"), and a word like "mark", "task" or "list" can
+belong to any intent.
 
 Intents:
 {intent_list}
@@ -1207,7 +1285,9 @@ Entities (omit when absent):
 - target_grade: grade_target;  grade: cgpa_predict / best_case_cgpa (10=S 9=A 8=B 7=C 6=D 5=E)
 - target_cgpa: overall_cgpa_target;  alias, course_query: alias_add;  fact: remember_fact
 - action (play|open|pause|resume|next|previous|volume_up|volume_down|now_playing), query (song, play only): spotify
-- query: task_complete / task_drop / schedule_delete
+- title (the thing to do, without "remind me to" or the date), due (the date/time words as said): task_add
+- query (words identifying the task), or all: true for every task: task_complete / task_drop
+- query: schedule_delete;  query (merchant/place/item): expense_search;  period (today|week|month): expense_summary
 
 Reply with JSON only: {{"intent": "<name>", "entities": {{}}, "confidence": 0.0-1.0}}
 
@@ -1222,6 +1302,14 @@ Examples:
 "turn it down a bit" -> {{"intent": "pc", "entities": {{}}, "confidence": 0.8}}
 "let amma know I'll be late" -> {{"intent": "whatsapp", "entities": {{}}, "confidence": 0.9}}
 "find cheap flights to goa on skyscanner" -> {{"intent": "web", "entities": {{}}, "confidence": 0.9}}
+"remind me to submit the fees on friday" -> {{"intent": "task_add", "entities": {{"title": "submit the fees", "due": "friday"}}, "confidence": 0.95}}
+"add buy milk to my to do list" -> {{"intent": "task_add", "entities": {{"title": "buy milk"}}, "confidence": 0.95}}
+"mark has completed for all tasks" -> {{"intent": "task_complete", "entities": {{"all": true}}, "confidence": 0.9}}
+"I finished the fees thing" -> {{"intent": "task_complete", "entities": {{"query": "fees"}}, "confidence": 0.9}}
+"what did I get in DAA CAT1" -> {{"intent": "vtop_marks", "entities": {{"course": "DAA"}}, "confidence": 0.95}}
+"mark my words this will work" -> {{"intent": "chat", "entities": {{}}, "confidence": 0.95}}
+"sync my LMS" -> {{"intent": "lms_sync", "entities": {{}}, "confidence": 0.95}}
+"how much did I spend at swiggy" -> {{"intent": "expense_search", "entities": {{"query": "swiggy"}}, "confidence": 0.95}}
 "explain cpu scheduling" -> {{"intent": "chat", "entities": {{}}, "confidence": 0.95}}
 "how should I prepare for CAT exams" -> {{"intent": "chat", "entities": {{}}, "confidence": 0.9}}
 "what is virtual memory" -> {{"intent": "chat", "entities": {{}}, "confidence": 0.95}}
@@ -1253,7 +1341,9 @@ def extract_general_intent_groq(text: str) -> dict | None:
                                       recent_turns=recent_turns)
 
     try:
-        data = complete_json([{"role": "user", "content": prompt}], max_tokens=120)
+        # 5 s budget: a normal classification takes 0.3-1.5 s; past that the
+        # offline rules answer instead of leaving KK waiting.
+        data = complete_json([{"role": "user", "content": prompt}], max_tokens=120, deadline_s=5.0)
     except (LLMUnavailable, ValueError) as e:
         print(f"[router] Stage 2 intent extraction failed: {e}")
         return None
@@ -1344,6 +1434,9 @@ def _offline_fallback(text: str) -> tuple:
         and not _is_impersonal_question(t)
         and not _has_any(t, ("tips", "tip", "prepare", "preparation", "plan", "how to", "how should", "advice",
                              "what is", "what are", "explain"))
+        # "I'm feeling stressed about exams" wants support, not a schedule.
+        and not _has_any(t, ("feel", "feeling", "stressed", "stress", "worried", "anxious", "scared", "nervous",
+                             "tired", "sad", "bored", "hate", "love"))
     )
     for keywords, category in _KEYWORD_DATA_FALLBACKS:
         if looks_like_data_question and _has_any(t, keywords):
@@ -1389,18 +1482,24 @@ def _course_followup(text: str) -> tuple | None:
     return None
 
 
+_COURSE_INTENTS = {"attendance", "bunk_check", "grade_history", "vtop_marks", "exams", "class_at_time",
+                   "cgpa_predict", "grade_target"}
+
+
 def route(text: str) -> tuple:
     """
     Returns (category, payload). `category` is looked up in server.py's
     INTENT_HANDLERS registry; "brain" means plain conversation.
     """
-    fast_result = fast_path_route(text) or _course_followup(text)
+    fast_result = reflex_route(text) or _course_followup(text)
     if fast_result:
         category, payload = fast_result
     else:
         classified = extract_general_intent_groq(text)
         if classified is None:
-            category, payload = _offline_fallback(text)
+            # Every model is down: keyword rules beat answering everything
+            # as chat, so they come back as the fallback.
+            category, payload = fast_path_route(text) or _offline_fallback(text)
         elif classified["intent"] == "chat" or classified["confidence"] < MIN_INTENT_CONFIDENCE:
             return "brain", None
         else:
@@ -1412,6 +1511,20 @@ def route(text: str) -> tuple:
     # nothing PC-related is in the text, falls back to chat).
     if category == "system_shutdown" and "jarvis" not in text.lower():
         category, payload = "pc", {}
+
+    # Course backstop: whichever path routed a course-specific question,
+    # the course named in the sentence must reach the feature. Measured:
+    # "what's my attendance in DAA" via the instant/offline path arrived
+    # with no course and was answered with OVERALL attendance.
+    if category in _COURSE_INTENTS and isinstance(payload, dict) and not payload.get("course") \
+            and not _looks_like_followup(text):
+        try:
+            from core.course_resolver import resolve_course_best
+            best = resolve_course_best(text)
+            if best:
+                payload = {**payload, "course": best["course_name"]}
+        except Exception as e:
+            print(f"[router] course backstop failed: {e}")
 
     if isinstance(payload, dict) and not payload.get("course") and _looks_like_followup(text):
         from core.context import get_last_entity

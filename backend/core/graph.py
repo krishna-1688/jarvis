@@ -73,6 +73,11 @@ _STOPWORDS = {
     "learning", "study", "studying", "understand", "start", "started", "try", "trying", "feel",
     "feeling", "think", "thinking", "lower", "higher", "other", "others", "first", "last", "next",
     "struggle", "struggling", "wrong", "right", "should", "shall", "must", "might", "able", "than",
+    # everyday filler that small talk kept turning into topics
+    "back", "down", "little", "name", "looking", "glad", "love", "whole", "well", "here", "come",
+    "coming", "call", "went", "take", "took", "put", "keep", "said", "sound", "sounds", "maybe",
+    "actually", "basically", "literally", "always", "never", "every", "each", "same", "such",
+    "while", "after", "before", "around", "through", "over", "under", "didn", "doesn", "isn",
 }
 
 
@@ -158,9 +163,10 @@ def _decayed(weight: float, updated: float, now: float, half_life_days: float = 
 
 def _content_words(text: str) -> list:
     words = []
-    for w in re.findall(r"[a-z][a-z0-9+#']{3,}", (text or "").lower()):
-        w = w.strip("'")
-        if w in _STOPWORDS or len(w) < 4:
+    for w in re.findall(r"[a-z][a-z0-9+#'’]{3,}", (text or "").lower()):
+        # Contractions ("that's", "didn't", "you're") are never topics —
+        # plural-stripping used to turn "that's" into a node called "that'".
+        if "'" in w or "’" in w or w in _STOPWORDS or len(w) < 4:
             continue
         if len(w) > 5 and w.endswith("ies"):
             w = w[:-3] + "y"
@@ -609,6 +615,66 @@ class MemoryGraph:
             "recent": [(_ago(now - ts), text) for ts, text in events],
         }
 
+    def snapshot(self, limit: int = 42) -> dict:
+        """The most alive part of memory for the dashboard's constellation:
+        nodes ranked by recency-weighted mentions (30-day half-life) and the
+        decayed links among them."""
+        conn = self._reader()
+        now = _now()
+        rows = conn.execute(
+            "SELECT id, kind, label, mentions, last_seen FROM nodes ORDER BY last_seen DESC LIMIT 400"
+        ).fetchall()
+        ranked = sorted(
+            ((r[0], r[1], r[2], r[3] * math.pow(0.5, max(0.0, now - r[4]) / 86400.0 / 30.0), r[4], r[3]) for r in rows),
+            key=lambda x: -x[3],
+        )
+        # Real things first (courses, exams, people, tasks, facts); topics
+        # fill the rest only once they've come up more than once.
+        specific = [s for s in ranked if s[1] != "topic"][:limit]
+        topics = [s for s in ranked if s[1] == "topic" and s[5] >= 2][:max(0, limit - len(specific))]
+        scored = sorted(specific + topics, key=lambda x: -x[3])
+        scored = [s[:5] for s in scored]
+        if not scored:
+            return {"nodes": [], "edges": []}
+        top = max(s[3] for s in scored) or 1.0
+        ids = [s[0] for s in scored]
+        ph = ",".join("?" * len(ids))
+        edges = []
+        for a, b, w, updated in conn.execute(
+            f"SELECT a, b, weight, updated FROM edges WHERE a IN ({ph}) AND b IN ({ph})", ids + ids
+        ):
+            d = _decayed(w, updated, now)
+            if d >= PRUNE_BELOW:
+                edges.append({"a": a, "b": b, "w": round(d, 3)})
+        edges.sort(key=lambda e: -e["w"])
+        return {
+            "nodes": [{"id": i, "kind": k, "label": lbl, "weight": round(s / top, 3), "seen": _ago(now - seen)}
+                      for i, k, lbl, s, seen in scored],
+            "edges": edges[:140],
+        }
+
+    def node_detail(self, node_id: int) -> dict | None:
+        conn = self._reader()
+        now = _now()
+        node = conn.execute("SELECT id, kind, label, mentions, last_seen FROM nodes WHERE id=?", (node_id,)).fetchone()
+        if not node:
+            return None
+        neighbours = self._neighbours(conn, node_id, now, 8)
+        labels = {r[0]: (r[1], r[2]) for r in conn.execute(
+            f"SELECT id, kind, label FROM nodes WHERE id IN ({','.join('?' * len(neighbours)) or 'NULL'})",
+            [n for n, _ in neighbours])} if neighbours else {}
+        events = conn.execute(
+            "SELECT e.ts, e.text, e.reply FROM event_links el JOIN events e ON e.id=el.event_id WHERE el.node_id=? "
+            "ORDER BY e.id DESC LIMIT 4", (node_id,)).fetchall()
+        count = conn.execute("SELECT count(*) FROM event_links WHERE node_id=?", (node_id,)).fetchone()[0]
+        return {
+            "id": node[0], "kind": node[1], "label": node[2], "events": count, "seen": _ago(now - node[4]),
+            "activity": round(min(1.0, node[3] * math.pow(0.5, max(0.0, now - node[4]) / 86400.0 / 30.0) / 10.0), 3),
+            "links": [{"id": n, "kind": labels[n][0], "label": labels[n][1], "w": round(w, 3)}
+                      for n, w in neighbours if n in labels][:6],
+            "recent": [{"ago": _ago(now - ts), "text": text[:120], "reply": reply[:140]} for ts, text, reply in events],
+        }
+
     def _forget_nodes(self, conn, node_ids, box):
         if not node_ids:
             box["removed"] = 0
@@ -665,7 +731,17 @@ class MemoryGraph:
         orphans = conn.execute(
             "DELETE FROM nodes WHERE kind='topic' AND pinned=0 AND mentions < 2 AND last_seen < ? "
             "AND id NOT IN (SELECT a FROM edges) AND id NOT IN (SELECT b FROM edges)", (now - 60 * 86400,)).rowcount
-        box.update(pruned=len(doomed), capped=capped, orphans=orphans)
+        # Topics an older extractor made that today's would reject
+        # (contractions, filler words). Only the node and its links go —
+        # the conversations it was attached to stay, linked to their other
+        # nodes (unlike forget_about, which deletes the conversations too).
+        junk = [r[0] for r in conn.execute("SELECT id, key FROM nodes WHERE kind='topic' AND pinned=0").fetchall()
+                if _content_words(r[1]) != [r[1]]]
+        for node_id in junk:
+            conn.execute("DELETE FROM edges WHERE a=? OR b=?", (node_id, node_id))
+            conn.execute("DELETE FROM event_links WHERE node_id=?", (node_id,))
+            conn.execute("DELETE FROM nodes WHERE id=?", (node_id,))
+        box.update(pruned=len(doomed), capped=capped, orphans=orphans, junk=len(junk))
 
     def maintain(self) -> dict:
         box = {}

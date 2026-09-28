@@ -8,15 +8,18 @@ written to disk: the image lives in memory for the length of one call.
 
 import base64
 import io
+import time
 
 from core.brain import to_spoken
 from core.llm import LLMUnavailable, complete, shortest_cooldown
 from features.base import FeatureResult
 
-# Long side after downscaling. 1600 px keeps normal UI text legible to the
-# vision model while the JPEG stays well under Groq's 4 MB base64 limit.
-MAX_SIDE = 1600
+# Long side after downscaling. 1280 px keeps normal UI text legible to the
+# vision model; bigger costs more of the per-minute token budget (the
+# vision model is shared with intent routing) for little gain.
+MAX_SIDE = 1280
 JPEG_QUALITY = 80
+THUMB_SIDE = 440
 
 _SYSTEM = (
     "You are Jarvis, KK's voice assistant, looking at a screenshot of KK's screen. "
@@ -29,24 +32,31 @@ _SYSTEM = (
 )
 
 
-def capture_jpeg_b64() -> str:
-    """Primary monitor as a base64 JPEG, downscaled to MAX_SIDE."""
+def _jpeg_b64(img, side: int, quality: int) -> str:
+    copy = img.copy()
+    copy.thumbnail((side, side))
+    buf = io.BytesIO()
+    copy.save(buf, format="JPEG", quality=quality, optimize=True)
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def capture_jpeg_b64() -> tuple[str, str]:
+    """Primary monitor as base64 JPEGs: (for the model at MAX_SIDE, a small
+    thumbnail the dashboard shows beside the answer)."""
     from PIL import ImageGrab  # lazy: Pillow only loads when someone asks
 
     img = ImageGrab.grab()
     try:
         img = img.convert("RGB")
-        img.thumbnail((MAX_SIDE, MAX_SIDE))
-        buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=JPEG_QUALITY, optimize=True)
-        return base64.b64encode(buf.getvalue()).decode("ascii")
+        return _jpeg_b64(img, MAX_SIDE, JPEG_QUALITY), _jpeg_b64(img, THUMB_SIDE, 70)
     finally:
         img.close()
 
 
 def describe_screen(question: str) -> FeatureResult:
+    started = time.monotonic()
     try:
-        image_b64 = capture_jpeg_b64()
+        image_b64, thumb_b64 = capture_jpeg_b64()
     except Exception as e:
         msg = "I couldn't capture your screen just now."
         return FeatureResult(ok=False, data={}, display=msg, spoken=msg, error=str(e))
@@ -68,4 +78,7 @@ def describe_screen(question: str) -> FeatureResult:
 
     # Speak only the opening answer; the breakdown after it is for reading.
     first_para = answer.strip().split("\n\n", 1)[0]
-    return FeatureResult(ok=True, data={}, display=answer, spoken=to_spoken(first_para))
+    # The thumbnail only travels to the open dashboard (in memory); the
+    # conversation table stores chat text, never this.
+    data = {"screen": True, "thumb": thumb_b64, "seconds": round(time.monotonic() - started, 1)}
+    return FeatureResult(ok=True, data=data, display=answer, spoken=to_spoken(first_para))
