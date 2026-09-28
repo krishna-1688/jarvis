@@ -1,5 +1,5 @@
 import { parseExamDate } from '../lib/examMath.js';
-import { bunkInfo } from '../modules/AttendanceModule/bunkMath.js';
+import { bunkInfo } from '../lib/bunkMath.js';
 
 export { parseExamDate, bunkInfo };
 

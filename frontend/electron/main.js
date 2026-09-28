@@ -1,6 +1,5 @@
-const { app, BrowserWindow, globalShortcut, ipcMain, shell } = require('electron');
+const { app, BrowserWindow, globalShortcut, ipcMain, screen, shell } = require('electron');
 const path = require('path');
-const fs = require('fs');
 
 // Dev (npm run electron) sets ELECTRON_START_URL and uses the Vite server;
 // otherwise the prebuilt dist/ is loaded, which is how the backend's
@@ -24,14 +23,16 @@ function loadWindow(win, mode) {
 }
 
 function createConsoleWindow() {
+  // The console is designed at 1500x950; shrink to fit smaller screens.
+  const area = screen.getPrimaryDisplay().workAreaSize;
   consoleWin = new BrowserWindow({
-    width: 1200,
-    height: 760,
+    width: Math.min(1500, Math.round(area.width * 0.92)),
+    height: Math.min(950, Math.round(area.height * 0.92)),
     minWidth: 900,
     minHeight: 600,
     frame: false,
     show: false,
-    backgroundColor: '#04050A',
+    backgroundColor: '#0B0A09',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -94,33 +95,4 @@ ipcMain.handle('open-console', () => {
   if (!consoleWin) return;
   consoleWin.show();
   consoleWin.focus();
-});
-
-// Rack layouts persist to userData JSON (not localStorage) per Section 1.4,
-// so widget/console layouts survive independently of any web storage the
-// renderer's origin might lose (e.g. a cache clear).
-function layoutsDir() {
-  const dir = path.join(app.getPath('userData'), 'layouts');
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  return dir;
-}
-
-ipcMain.handle('layout-load', (_event, rackId) => {
-  try {
-    const file = path.join(layoutsDir(), `${rackId}.json`);
-    if (!fs.existsSync(file)) return null;
-    return JSON.parse(fs.readFileSync(file, 'utf-8'));
-  } catch {
-    return null;
-  }
-});
-
-ipcMain.handle('layout-save', (_event, rackId, data) => {
-  try {
-    const file = path.join(layoutsDir(), `${rackId}.json`);
-    fs.writeFileSync(file, JSON.stringify(data));
-    return true;
-  } catch {
-    return false;
-  }
 });

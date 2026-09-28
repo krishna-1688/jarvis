@@ -1,6 +1,5 @@
 import { useEffect, useRef, useSyncExternalStore } from 'react';
 import { WS_URL } from '../api.js';
-import { USE_MOCK } from '../mock.js';
 
 /**
  * A single shared WebSocket connection to /stream, reused by every
@@ -28,7 +27,6 @@ function setStatus(next) {
 
 function connect() {
   retryTimer = null;
-  if (USE_MOCK) return;
 
   ws = new WebSocket(WS_URL);
   ws.onopen = () => {
@@ -54,27 +52,24 @@ function connect() {
 }
 
 function ensureConnected() {
-  if (!USE_MOCK && !ws && !retryTimer) connect();
+  if (!ws && !retryTimer) connect();
 }
 
 /** Non-hook subscription for module-level stores (orbit/store.js).
  * Returns an unsubscribe function. */
 export function subscribeWebSocket(fn) {
-  if (USE_MOCK) return () => {};
   subscribers.add(fn);
   ensureConnected();
   return () => subscribers.delete(fn);
 }
 
 /** Subscribes to every parsed JSON frame on the shared socket (including
- * {"type":"ping"} — callers filter for what they care about). No-op
- * while USE_MOCK is true. */
+ * {"type":"ping"} — callers filter for what they care about). */
 export function useWebSocket(onMessage) {
   const handlerRef = useRef(onMessage);
   handlerRef.current = onMessage;
 
   useEffect(() => {
-    if (USE_MOCK) return undefined;
     const handler = (data) => handlerRef.current(data);
     subscribers.add(handler);
     ensureConnected();

@@ -102,6 +102,47 @@ export function AttendanceBars({ rows = [], limit, showActions = true, compact =
   );
 }
 
+/** Every course as a dial with the 75% line marked; the tightest course
+ * is the one coloured, the rest stay calm. */
+export function AttendanceRings({ rows = [] }) {
+  const { send } = useOrbit();
+  const sorted = [...rows].sort((a, b) => (a.percentage ?? 101) - (b.percentage ?? 101));
+  const tightest = sorted[0];
+  const C = 2 * Math.PI * 40;
+  return (
+      <motion.div className="att-rings" variants={stagger} initial="hidden" animate="show">
+        {sorted.map((r, i) => {
+          const pct = Math.max(0, Math.min(100, r.percentage ?? 0));
+          const info = bunkInfo(r.attended_classes || 0, r.total_classes || 0);
+          const tone = !info.safe ? 'bad' : (r === tightest && info.canSkip <= 3) ? 'warn' : 'ok';
+          const color = tone === 'bad' ? '#FF6A2B' : tone === 'warn' ? '#E8C27A' : '#9FB8A0';
+          return (
+            <motion.button type="button" key={r.course_code} className="att-ring" variants={rise} title={cleanCourse(r.course_name)}
+              onClick={() => send(`can I skip ${cleanCourse(r.course_name)} tomorrow`)}>
+              <div className="att-ring__dial">
+                <svg width="100" height="100" viewBox="0 0 100 100" aria-hidden>
+                  <circle cx="50" cy="50" r="40" fill="none" stroke="rgba(243,237,228,.07)" strokeWidth="5" />
+                  <motion.circle cx="50" cy="50" r="40" fill="none" stroke={color} strokeWidth="5" strokeLinecap="round"
+                    strokeDasharray={C} initial={{ strokeDashoffset: C }} animate={{ strokeDashoffset: C * (1 - pct / 100) }}
+                    transition={{ type: 'spring', stiffness: 50, damping: 16, delay: 0.1 + i * 0.06 }}
+                    transform="rotate(-90 50 50)" style={tone !== 'ok' ? { filter: `drop-shadow(0 0 5px ${color}99)` } : undefined} />
+                  <path d="M4 50h9" stroke="#F3EDE4" strokeWidth="1.5" opacity=".45" />
+                </svg>
+                <span className="att-ring__pct">{Math.round(pct)}</span>
+              </div>
+              <div>
+                <div className="att-ring__name">{shortCourse(r.course_name)}</div>
+                <div className="att-ring__meta" style={tone !== 'ok' ? { color } : undefined}>
+                  {r.attended_classes}/{r.total_classes} · {info.safe ? `${info.canSkip} spare` : `need ${info.needed}`}
+                </div>
+              </div>
+            </motion.button>
+          );
+        })}
+    </motion.div>
+  );
+}
+
 /* ── Schedule ───────────────────────────────── */
 
 export function Timeline({ blocks = [], now = new Date(), relative = true }) {

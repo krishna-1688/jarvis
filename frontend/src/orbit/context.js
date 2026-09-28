@@ -10,5 +10,5 @@ export const OrbitActions = createContext({
 
 export const useOrbit = () => useContext(OrbitActions);
 
-/** Alt+1..7 order, matching the glance rail. */
-export const LENS_ORDER = ['schedule', 'attendance', 'exams', 'assignments', 'tasks', 'focus', 'money'];
+/** Alt+1..8 order. */
+export const LENS_ORDER = ['schedule', 'attendance', 'exams', 'assignments', 'tasks', 'focus', 'money', 'memory'];

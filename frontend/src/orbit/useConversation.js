@@ -30,6 +30,9 @@ export function useConversation() {
   const messagesRef = useRef(messages);
   const settleTimer = useRef(null);
   const draftTimer = useRef(null);
+  // Set once the user acts (sends or clears): a late restore must not
+  // overwrite what they just did.
+  const touched = useRef(false);
   messagesRef.current = messages;
 
   const push = useCallback((m) => {
@@ -56,7 +59,7 @@ export function useConversation() {
   useEffect(() => {
     let cancelled = false;
     api.conversationRecent().then(({ turns = [] }) => {
-      if (cancelled || !turns.length) return;
+      if (cancelled || touched.current || !turns.length) return;
       setMessages((current) => {
         if (current.length) return current;
         const restored = [];
@@ -78,6 +81,7 @@ export function useConversation() {
   const send = useCallback(async (raw) => {
     const text = (raw || '').trim();
     if (!text) return;
+    touched.current = true;
     stopSpeaking();
     push({ role: 'user', text, via: 'text' });
     setPending(true);
@@ -149,6 +153,7 @@ export function useConversation() {
   });
 
   const clear = useCallback(() => {
+    touched.current = true;
     setMessages([]);
     setExpecting(false);
   }, []);

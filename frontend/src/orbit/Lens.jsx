@@ -5,6 +5,7 @@ import { useOrbit } from './context.js';
 import { useNow } from './useNow.js';
 import { AssignmentCards, AttendanceBars, ExamCards, Ring, TaskList, Timeline } from './viz.jsx';
 import { durShort, inr, shortCourse, toDate, upcomingExams } from './format.js';
+import Memory from './Memory.jsx';
 
 function QuickInput({ placeholder, prefix = '', hint }) {
   const { send } = useOrbit();
@@ -13,7 +14,9 @@ function QuickInput({ placeholder, prefix = '', hint }) {
     <form className="quick" onSubmit={(e) => { e.preventDefault(); if (v.trim()) { send(prefix + v.trim()); setV(''); } }}>
       {prefix && <span className="quick__prefix">{prefix.trim()}</span>}
       <input value={v} onChange={(e) => setV(e.target.value)} placeholder={placeholder} spellCheck={false} />
-      <button type="submit" disabled={!v.trim()}>↵</button>
+      <button type="submit" disabled={!v.trim()} aria-label="Send">
+        <svg viewBox="0 0 24 24" className="ico" style={{ width: 15, height: 15 }}><path d="M5 12h14M13 6l6 6-6 6" /></svg>
+      </button>
       {hint && <span className="quick__hint dim">{hint}</span>}
     </form>
   );
@@ -212,13 +215,14 @@ function MoneyLens() {
 }
 
 const LENSES = {
-  schedule:    { title: 'Schedule',    icon: '◷', Body: ScheduleLens },
-  attendance:  { title: 'Attendance',  icon: '◔', Body: AttendanceLens },
-  exams:       { title: 'Exams',       icon: '✦', Body: ExamsLens },
-  assignments: { title: 'Assignments', icon: '▤', Body: AssignmentsLens },
-  tasks:       { title: 'Tasks',       icon: '✓', Body: TasksLens },
-  focus:       { title: 'Focus',       icon: '◉', Body: FocusLens },
-  money:       { title: 'Money',       icon: '₹', Body: MoneyLens },
+  schedule:    { title: 'Schedule',    kicker: 'Today', Body: ScheduleLens },
+  attendance:  { title: 'Attendance',  kicker: 'VTOP', Body: AttendanceLens },
+  exams:       { title: 'Exams',       kicker: 'VTOP', Body: ExamsLens },
+  assignments: { title: 'Assignments', kicker: 'LMS', Body: AssignmentsLens },
+  tasks:       { title: 'Tasks',       kicker: 'Yours', Body: TasksLens },
+  focus:       { title: 'Focus',       kicker: 'Deep work', Body: FocusLens },
+  money:       { title: 'Money',       kicker: 'This month', Body: MoneyLens },
+  memory:      { title: 'What Jarvis connects', kicker: 'Memory', Body: Memory, wide: true },
 };
 
 /** Subtitle helpers for the lens header. */
@@ -242,23 +246,27 @@ export default function Lens({ name, onClose }) {
             initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} />
           <motion.aside
             key={name}
-            className="lens"
-            initial={{ x: 40, opacity: 0, filter: 'blur(8px)' }}
-            animate={{ x: 0, opacity: 1, filter: 'blur(0px)' }}
-            exit={{ x: 40, opacity: 0, filter: 'blur(8px)' }}
+            className={`lens ${lens.wide ? 'lens--wide' : ''}`}
+            initial={lens.wide ? { y: 24, opacity: 0, scale: 0.985 } : { x: 40, opacity: 0, filter: 'blur(8px)' }}
+            animate={lens.wide ? { y: 0, opacity: 1, scale: 1 } : { x: 0, opacity: 1, filter: 'blur(0px)' }}
+            exit={lens.wide ? { y: 24, opacity: 0, scale: 0.985 } : { x: 40, opacity: 0, filter: 'blur(8px)' }}
             transition={{ type: 'spring', stiffness: 320, damping: 32 }}
           >
             <header className="lens__head">
-              <span className="lens__icon" aria-hidden>{lens.icon}</span>
               <div>
+                <span className="x" style={{ color: '#FF8A4C' }}>{lens.kicker}</span>
                 <h3>{lens.title}</h3>
                 {subtitle && <span className="dim small">{subtitle}</span>}
               </div>
-              <button type="button" className="icon-btn" onClick={onClose} aria-label="Close" title="Close (Esc)">✕</button>
+              <button type="button" className="icon-btn" onClick={onClose} aria-label="Close" title="Close (Esc)">
+                <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18" /></svg>
+              </button>
             </header>
-            <div className="lens__body">
-              <lens.Body />
-            </div>
+            {lens.wide ? <lens.Body /> : (
+              <div className="lens__body">
+                <lens.Body />
+              </div>
+            )}
           </motion.aside>
         </>
       )}

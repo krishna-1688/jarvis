@@ -6,97 +6,29 @@ html, body, #root {
 }
 
 body {
-  background: var(--chassis);
-  color: var(--ink);
+  background: #0B0A09;
+  color: #F3EDE4;
   font-family: var(--font-ui);
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
   overflow: hidden;
   user-select: none;
-}
-
-.mono {
-  font-family: var(--font-mono);
-  font-variant-numeric: tabular-nums;
-}
-
-.panel {
-  background: var(--panel);
-  border: 1px solid var(--panel-border);
-  border-radius: var(--radius-panel);
-  box-shadow: inset 0 1px 0 var(--panel-edge-highlight);
-}
-
-.inset {
-  background: var(--inset);
-  border-radius: var(--radius-control);
-  box-shadow: inset 0 2px 4px var(--inset-shadow);
-}
-
-.display-well {
-  background: var(--display-bg);
-  border-radius: var(--radius-control);
-  box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.5);
-  color: var(--display-glow);
 }
 
 button {
   font-family: var(--font-ui);
   border: none;
   background: transparent;
-  color: var(--ink);
+  color: inherit;
   cursor: pointer;
   padding: 0;
 }
 
 input {
   font-family: var(--font-ui);
-  color: var(--ink);
+  color: inherit;
   background: transparent;
   border: none;
 }
 
-/* Electron frameless-window drag regions — must stay scoped to the top
-   rail / widget shell only, never the whole document, or module drag
-   inside the rack would drag the OS window instead. */
-.drag-region { -webkit-app-region: drag; }
-.no-drag     { -webkit-app-region: no-drag; }
-
-.chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 2px 8px;
-  font-size: 10px;
-  letter-spacing: 0.04em;
-  border-radius: var(--radius-control);
-  background: var(--inset);
-  color: var(--ink-dim);
-  font-family: var(--font-ui);
-  text-transform: uppercase;
-  white-space: nowrap;
-}
-
-/* An indicator light, not just colored text — reads as a hardware panel LED. */
-.chip::before {
-  content: '';
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: currentColor;
-  flex-shrink: 0;
-}
-
-.chip--ok      { color: var(--safe); }
-.chip--warn    { color: var(--signal); }
-.chip--pending { color: var(--ink-dim); opacity: 0.6; }
-.chip--error   { color: var(--error); }
-.chip--warn::before  { box-shadow: 0 0 3px color-mix(in srgb, var(--signal) 70%, transparent); }
-.chip--ok::before    { box-shadow: 0 0 3px color-mix(in srgb, var(--safe) 60%, transparent); }
-.chip--error::before { box-shadow: 0 0 3px color-mix(in srgb, var(--error) 70%, transparent); }
-
-::-webkit-scrollbar { width: 8px; height: 8px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb {
-  background: var(--inset);
-  border-radius: var(--radius-control);
-}
+:focus-visible { outline: 1.5px solid #FF6A2B; outline-offset: 2px; }

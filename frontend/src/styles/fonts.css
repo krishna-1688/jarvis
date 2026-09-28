@@ -1,54 +1,15 @@
-/* Bundled locally per spec — no CDN/Google Fonts network calls. */
-
-@font-face {
-  font-family: 'Space Grotesk';
-  src: url('../assets/fonts/SpaceGrotesk-Variable.ttf') format('truetype-variations'),
-       url('../assets/fonts/SpaceGrotesk-Variable.ttf') format('truetype');
-  font-weight: 300 700;
-  font-style: normal;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: 'JetBrains Mono';
-  src: url('../assets/fonts/JetBrainsMono-Variable.ttf') format('truetype-variations'),
-       url('../assets/fonts/JetBrainsMono-Variable.ttf') format('truetype');
-  font-weight: 100 800;
-  font-style: normal;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: 'DSEG7';
-  src: url('../assets/fonts/DSEG7/DSEG7Classic-Regular.woff2') format('woff2');
-  font-weight: 400;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: 'DSEG7';
-  src: url('../assets/fonts/DSEG7/DSEG7Classic-Bold.woff2') format('woff2');
-  font-weight: 700;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: 'DSEG14';
-  src: url('../assets/fonts/DSEG14/DSEG14Classic-Regular.woff2') format('woff2');
-  font-weight: 400;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: 'DSEG14';
-  src: url('../assets/fonts/DSEG14/DSEG14Classic-Bold.woff2') format('woff2');
-  font-weight: 700;
-  font-display: swap;
-}
+/* Ember type: bundled locally (no network), latin subsets only.
+   Michroma      — wordmark and small caps labels
+   Instrument    — headings and text
+   IBM Plex Mono — every number, time and count */
+@import '@fontsource/michroma/latin-400.css';
+@import '@fontsource-variable/instrument-sans/wght.css';
+@import '@fontsource/ibm-plex-mono/latin-400.css';
+@import '@fontsource/ibm-plex-mono/latin-500.css';
+@import '@fontsource/ibm-plex-mono/latin-600.css';
 
 :root {
-  --font-ui:    'Space Grotesk', sans-serif;
-  --font-mono:  'JetBrains Mono', monospace;
-  --font-seg7:  'DSEG7', monospace;
-  --font-seg14: 'DSEG14', monospace;
+  --font-signal: 'Michroma', 'Instrument Sans Variable', sans-serif;
+  --font-ui:     'Instrument Sans Variable', system-ui, sans-serif;
+  --font-mono:   'IBM Plex Mono', ui-monospace, monospace;
 }

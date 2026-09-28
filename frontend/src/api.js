@@ -20,6 +20,8 @@ export const api = {
   exams: () => getJSON('/exams'),
   assignments: () => getJSON('/assignments'),
   conversationRecent: (minutes = 30) => getJSON(`/conversation/recent?minutes=${minutes}`),
+  memoryGraph: (limit = 42) => getJSON(`/memory/graph?limit=${limit}`),
+  memoryNode: (id) => getJSON(`/memory/node/${id}`),
   command: async (text) => {
     const res = await fetch(`${BASE_URL}/command`, {
       method: 'POST',

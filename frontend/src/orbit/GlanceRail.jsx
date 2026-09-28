@@ -1,233 +1,277 @@
-import { motion } from 'motion/react';
 import { useSource } from './store.js';
 import { useNow } from './useNow.js';
 import { useOrbit } from './context.js';
-import { Ring } from './viz.jsx';
 import {
-  attendanceTone, bunkInfo, cleanCourse, dayWord, dueInfo, durShort, hm, inr, shortCourse, toDate, upcomingExams,
+  bunkInfo, cleanCourse, dayWord, dueInfo, durShort, hm, inr, shortCourse, toDate, upcomingExams,
 } from './format.js';
 
-function Glance({ lens, label, children, tone, delay = 0, active }) {
-  const { openLens } = useOrbit();
-  return (
-    <motion.button
-      type="button"
-      className={`glance ${tone ? `glance--${tone}` : ''} ${active ? 'is-active' : ''}`}
-      onClick={() => openLens(lens)}
-      initial={{ opacity: 0, x: -16 }}
-      animate={{ opacity: 1, x: 0 }}
-      transition={{ delay, type: 'spring', stiffness: 260, damping: 26 }}
-      whileHover={{ y: -2 }}
-      whileTap={{ scale: 0.98 }}
-    >
-      <span className="glance__label">{label}</span>
-      {children}
-    </motion.button>
-  );
-}
+const pad = (n) => String(n).padStart(2, '0');
+const DAY = 86400000;
 
-function Skeleton() {
-  return <div className="skeleton"><i /><i /></div>;
-}
-
-function NowNext({ active, delay }) {
-  const now = useNow(15000);
-  const { data, loading } = useSource('schedule');
-  const blocks = (data?.blocks || [])
+function todaysBlocks(data) {
+  return (data?.blocks || [])
     .map((b) => ({ ...b, s: toDate(b.start_at), e: toDate(b.end_at) }))
     .filter((b) => b.s && b.e)
     .sort((a, b) => a.s - b.s);
-  const current = blocks.find((b) => now >= b.s && now < b.e);
-  const next = blocks.find((b) => b.s > now);
-  const doneCount = blocks.filter((b) => b.e <= now).length;
+}
 
-  let body;
-  if (loading && !data) body = <Skeleton />;
-  else if (current) {
-    const p = (now - current.s) / (current.e - current.s);
-    body = (
-      <div className="glance__row">
-        <Ring value={p} size={46} tone="accent"><small>{durShort(current.e - now)}</small></Ring>
-        <div className="glance__text">
-          <b>{cleanCourse(current.title)}</b>
-          <span className="dim">Now · ends {hm(current.e)}{next ? ` · then ${shortCourse(next.title)}` : ''}</span>
-        </div>
-      </div>
+function attendanceFor(rows, title) {
+  const key = shortCourse(title || '');
+  return rows.find((r) => shortCourse(r.course_name) === key)
+    || rows.find((r) => cleanCourse(r.course_name).toLowerCase() === cleanCourse(title || '').toLowerCase());
+}
+
+/** Shared "what needs attention" logic: the hero rail lists it, the slim
+ * rail and the greeting line summarise it. */
+export function useAttention() {
+  const now = useNow(60000);
+  const exams = upcomingExams(useSource('exams').data?.exams || [], now.getTime());
+  const pending = useSource('assignments').data?.pending || [];
+  const rows = useSource('attendance').data?.rows || [];
+  const tasks = useSource('tasks').data?.tasks || [];
+
+  const items = [];
+  const exam = exams[0];
+  if (exam && exam.start - now < 7 * DAY) {
+    const ms = exam.start - now;
+    items.push({
+      key: 'exam', lens: 'exams', hot: ms < 2 * DAY,
+      title: `${shortCourse(exam.course_name)} · ${exam.exam_type}`,
+      sub: `${dayWord(exam.start)}, ${hm(exam.start)}${exam.venue ? ` · ${exam.venue}` : ''}`,
+      value: durShort(ms),
+    });
+  }
+  const overdue = pending.filter((a) => dueInfo(a.due_date).tone === 'bad').length;
+  const soon = pending.filter((a) => dueInfo(a.due_date).tone === 'warn').length;
+  if (overdue || soon) {
+    items.push({
+      key: 'lms', lens: 'assignments', hot: false,
+      title: 'Assignments',
+      sub: overdue ? `${overdue} overdue on LMS${soon ? ` · ${soon} due soon` : ''}` : `${soon} due soon`,
+      value: String(overdue || soon),
+    });
+  }
+  const worst = [...rows].sort((a, b) => (a.percentage ?? 101) - (b.percentage ?? 101))[0];
+  if (worst) {
+    const info = bunkInfo(worst.attended_classes || 0, worst.total_classes || 0);
+    if (!info.safe || info.canSkip <= 1) {
+      items.push({
+        key: 'att', lens: 'attendance', hot: !info.safe,
+        title: `${shortCourse(worst.course_name)} attendance`,
+        sub: info.safe ? (info.canSkip ? '1 class to spare' : 'No classes to spare') : `Attend ${info.needed} more to reach 75%`,
+        value: `${(worst.percentage ?? 0).toFixed(0)}%`,
+      });
+    }
+  }
+  const lateTasks = tasks.filter((t) => t.due_at && dueInfo(t.due_at).tone === 'bad').length;
+  if (lateTasks) {
+    items.push({ key: 'tasks', lens: 'tasks', hot: false, title: 'Tasks', sub: `${lateTasks} overdue`, value: String(lateTasks) });
+  }
+  return { items, exam, overdue };
+}
+
+function NowCard() {
+  const { openLens } = useOrbit();
+  const minuteNow = useNow(30000);
+  const blocks = todaysBlocks(useSource('schedule').data);
+  const rows = useSource('attendance').data?.rows || [];
+  const tomorrow = todaysBlocks(useSource('tomorrow').data);
+  const current = blocks.find((b) => minuteNow >= b.s && minuteNow < b.e);
+  const next = blocks.find((b) => b.s > minuteNow);
+  const target = current ? current.e : next?.s;
+  // Tick every second only inside the final hour — a live countdown when
+  // it matters, one update a minute otherwise.
+  const close = target && target - minuteNow < 3600000;
+  const now = useNow(close ? 1000 : 30000);
+
+  if (!current && !next) {
+    const first = tomorrow[0];
+    return (
+      <button type="button" className="now-card now-card--calm rise" style={{ '--d': '0.2s' }} onClick={() => openLens('schedule')}>
+        <div className="now-card__count" style={{ fontSize: 26 }}>You're free</div>
+        <div className="now-card__unit">{blocks.length ? 'Classes are done for today' : 'Nothing scheduled today'}</div>
+        {first && <div className="now-card__meta"><span>Tomorrow</span><span className="mono">{hm(first.s)} · {shortCourse(first.title)}</span></div>}
+      </button>
     );
-  } else if (next) {
-    body = (
-      <div className="glance__row">
-        <div className="glance__big mono">{hm(next.s)}</div>
-        <div className="glance__text">
-          <b>{cleanCourse(next.title)}</b>
-          <span className="dim">in {durShort(next.s - now)}</span>
-        </div>
-      </div>
-    );
+  }
+
+  const block = current || next;
+  const left = Math.max(0, target - now);
+  const span = current ? current.e - current.s : 3600000;
+  const progress = current ? 1 - left / span : Math.max(0, 1 - left / span);
+  const C = 182.2;
+  const att = attendanceFor(rows, block.title);
+  const info = att ? bunkInfo(att.attended_classes || 0, att.total_classes || 0) : null;
+
+  let count;
+  if (left < 3600000) {
+    const s = Math.floor(left / 1000);
+    count = <>{pad(Math.floor(s / 60))}:{pad(s % 60)}</>;
   } else {
-    body = <div className="glance__text"><b>You're free</b><span className="dim">{blocks.length ? 'Done for today' : 'Nothing scheduled today'}</span></div>;
+    const mins = Math.round(left / 60000);
+    count = <>{Math.floor(mins / 60)}<small>h</small> {pad(mins % 60)}<small>m</small></>;
   }
 
   return (
-    <Glance lens="schedule" label={current ? 'Happening now' : 'Up next'} delay={delay} active={active}>
-      {body}
-      {blocks.length > 0 && (
-        <div className="glance__dots">
-          {blocks.map((b, i) => <i key={b.id ?? i} className={i < doneCount ? 'is-done' : b === current ? 'is-live' : ''} />)}
+    <button type="button" className={`now-card rise ${close ? 'now-card--live' : ''}`} style={{ '--d': '0.2s' }} onClick={() => openLens('schedule')}>
+      <div className="now-card__top">
+        <div className="now-card__ring">
+          <svg width="66" height="66" viewBox="0 0 66 66" aria-hidden>
+            <circle cx="33" cy="33" r="29" fill="none" stroke="rgba(243,237,228,.08)" strokeWidth="2" strokeDasharray="1.2 3.35" />
+            <circle cx="33" cy="33" r="29" fill="none" stroke="#FF6A2B" strokeWidth="2.5" strokeLinecap="round"
+              strokeDasharray={C} strokeDashoffset={C * (1 - Math.min(1, progress))} transform="rotate(-90 33 33)"
+              style={{ filter: 'drop-shadow(0 0 4px rgba(255,106,43,.8))', transition: 'stroke-dashoffset 1s linear' }} />
+          </svg>
+          <div className="now-card__tick"><i /></div>
         </div>
-      )}
-    </Glance>
+        <div>
+          <div className="now-card__count">{count}</div>
+          <div className="now-card__unit">{current ? `left · ends ${hm(current.e)}` : `until class · ${hm(next.s)}`}</div>
+        </div>
+      </div>
+      <div className="now-card__title">{cleanCourse(block.title)}</div>
+      <div className="now-card__meta">
+        <span>{current ? 'Happening now' : shortCourse(block.title)}{block.location ? ` · ${block.location}` : ''}</span>
+        {att && (
+          <span className="mono" style={{ color: info?.safe ? (info.canSkip > 1 ? '#9FB8A0' : '#E8C27A') : '#FF6A2B' }}>
+            {(att.percentage ?? 0).toFixed(0)}% · {info?.safe ? `${info.canSkip} spare` : `need ${info?.needed}`}
+          </span>
+        )}
+      </div>
+      <div className="now-card__sweep"><i /></div>
+    </button>
   );
 }
 
-function AttendanceGlance({ active, delay }) {
-  const { data, loading } = useSource('attendance');
-  const rows = data?.rows || [];
+function Sparkline({ values }) {
+  if (values.length < 2) return null;
+  const min = Math.min(...values, 70);
+  const max = Math.max(...values, 100);
+  const pts = values.map((v, i) => [1 + (i * 62) / (values.length - 1), 18 - ((v - min) / (max - min || 1)) * 16]);
+  const d = pts.map(([x, y], i) => `${i ? 'L' : 'M'}${x.toFixed(1)} ${y.toFixed(1)}`).join(' ');
+  const [lx, ly] = pts[pts.length - 1];
+  return (
+    <svg width="64" height="20" viewBox="0 0 64 20" aria-hidden>
+      <path d={d} fill="none" stroke="#9FB8A0" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+      <circle cx={lx} cy={ly} r="2" fill="#9FB8A0" />
+    </svg>
+  );
+}
+
+function Glance() {
+  const { openLens, send } = useOrbit();
+  const rows = useSource('attendance').data?.rows || [];
+  const tasks = useSource('tasks').data?.tasks || [];
+  const focus = useSource('focus').data?.active;
+  const money = useSource('money').data;
+  const now = useNow(focus ? 1000 : 60000);
   const attended = rows.reduce((s, r) => s + (r.attended_classes || 0), 0);
   const total = rows.reduce((s, r) => s + (r.total_classes || 0), 0);
   const overall = total ? (attended / total) * 100 : null;
-  const worst = [...rows].sort((a, b) => (a.percentage ?? 101) - (b.percentage ?? 101))[0];
-  const info = worst ? bunkInfo(worst.attended_classes || 0, worst.total_classes || 0) : null;
-  const tone = attendanceTone(worst?.percentage);
 
-  return (
-    <Glance lens="attendance" label="Attendance" tone={tone === 'bad' ? 'bad' : undefined} delay={delay} active={active}>
-      {loading && !data ? <Skeleton /> : rows.length === 0 ? <span className="dim">No attendance synced yet</span> : (
-        <>
-          <div className="glance__row">
-            <div className="glance__big">{overall?.toFixed(1)}<small>%</small></div>
-            <div className="spark">
-              {[...rows].sort((a, b) => (a.percentage ?? 0) - (b.percentage ?? 0)).map((r) => (
-                <i key={r.course_code} className={`fill-${attendanceTone(r.percentage)}`}
-                  style={{ height: `${Math.max(8, ((r.percentage ?? 0) - 50) * 2)}%` }} title={`${shortCourse(r.course_name)} ${r.percentage}%`} />
-              ))}
-            </div>
-          </div>
-          {worst && (
-            <span className="dim glance__foot">
-              Lowest <b className={`tone-${tone}`}>{shortCourse(worst.course_name)} {worst.percentage?.toFixed(0)}%</b>
-              {info && (info.safe ? ` · ${info.canSkip} to spare` : ` · attend ${info.needed}`)}
-            </span>
-          )}
-        </>
-      )}
-    </Glance>
-  );
-}
-
-function ExamGlance({ active, delay }) {
-  const now = useNow(60000);
-  const { data, loading } = useSource('exams');
-  const next = upcomingExams(data?.exams || [], now.getTime())[0];
-  const ms = next ? next.start - now : 0;
-  const tone = next && ms < 2 * 86400000 ? 'bad' : next && ms < 7 * 86400000 ? 'warn' : undefined;
-  return (
-    <Glance lens="exams" label="Next exam" tone={tone} delay={delay} active={active}>
-      {loading && !data ? <Skeleton /> : !next ? <span className="dim">No upcoming exams</span> : (
-        <div className="glance__row">
-          <div className="glance__big">
-            {ms >= 86400000 ? Math.floor(ms / 86400000) : Math.floor(ms / 3600000)}
-            <small>{ms >= 86400000 ? 'd' : 'h'}</small>
-          </div>
-          <div className="glance__text">
-            <b>{shortCourse(next.course_name)} · {next.exam_type}</b>
-            <span className="dim">{dayWord(next.start)} · {next.session?.split(' - ')[0] || hm(next.start)}{next.venue ? ` · ${next.venue}` : ''}</span>
-          </div>
-        </div>
-      )}
-    </Glance>
-  );
-}
-
-function AssignmentGlance({ active, delay }) {
-  const { data, loading } = useSource('assignments');
-  const items = [...(data?.pending || [])].sort((a, b) => (a.due_date || '9').localeCompare(b.due_date || '9'));
-  const overdue = items.filter((a) => dueInfo(a.due_date).tone === 'bad').length;
-  const upcoming = items.find((a) => dueInfo(a.due_date).tone !== 'bad');
-  return (
-    <Glance lens="assignments" label="Assignments" tone={overdue ? 'bad' : undefined} delay={delay} active={active}>
-      {loading && !data ? <Skeleton /> : (
-        <div className="glance__row">
-          <div className="glance__big">{items.length}</div>
-          <div className="glance__text">
-            <b>{items.length ? 'pending' : 'All clear'}</b>
-            <span className="dim">
-              {overdue ? <b className="tone-bad">{overdue} overdue</b> : null}
-              {overdue && upcoming ? ' · ' : ''}
-              {upcoming ? `${shortCourse(upcoming.course_name)} ${dueInfo(upcoming.due_date).label.toLowerCase()}` : ''}
-            </span>
-          </div>
-        </div>
-      )}
-    </Glance>
-  );
-}
-
-function TaskGlance({ active, delay }) {
-  const { data, loading } = useSource('tasks');
-  const tasks = data?.tasks || [];
-  const overdue = tasks.filter((t) => t.due_at && dueInfo(t.due_at).tone === 'bad').length;
-  return (
-    <Glance lens="tasks" label="Tasks" delay={delay} active={active}>
-      {loading && !data ? <Skeleton /> : (
-        <div className="glance__row">
-          <div className="glance__big">{tasks.length}</div>
-          <div className="glance__text">
-            <b>{tasks[0]?.title || 'Nothing on your plate'}</b>
-            <span className="dim">{overdue ? `${overdue} overdue` : tasks.length ? 'open' : 'say “remind me to…”'}</span>
-          </div>
-        </div>
-      )}
-    </Glance>
-  );
-}
-
-function FocusGlance({ active, delay }) {
-  const { data } = useSource('focus');
-  const now = useNow(data?.active ? 1000 : 60000);
-  const { data: stats } = useSource('focusStats');
-  const session = data?.active;
-  const weekMins = (stats?.stats || []).reduce((s, r) => s + (r.total_minutes || 0), 0);
-  if (session) {
-    const started = toDate(session.started_at);
-    const end = started ? started.getTime() + session.planned_minutes * 60000 : 0;
-    const left = Math.max(0, end - now.getTime());
-    const p = session.planned_minutes ? 1 - left / (session.planned_minutes * 60000) : 0;
-    const mm = String(Math.floor(left / 60000)).padStart(2, '0');
-    const ss = String(Math.floor((left % 60000) / 1000)).padStart(2, '0');
-    return (
-      <Glance lens="focus" label="Focusing" tone="focus" delay={delay} active={active}>
-        <div className="glance__row">
-          <Ring value={p} size={46} tone="violet"><small className="mono">{mm}:{ss}</small></Ring>
-          <div className="glance__text"><b>{session.subject}</b><span className="dim">{session.pomodoros_completed || 0} pomodoros</span></div>
-        </div>
-      </Glance>
-    );
+  let focusValue = null;
+  if (focus) {
+    const started = toDate(focus.started_at);
+    const left = started ? Math.max(0, started.getTime() + focus.planned_minutes * 60000 - now) : 0;
+    focusValue = `${pad(Math.floor(left / 60000))}:${pad(Math.floor((left % 60000) / 1000))}`;
   }
+
   return (
-    <Glance lens="focus" label="Focus" delay={delay} active={active}>
-      <div className="glance__text"><b>{weekMins ? `${durShort(weekMins * 60000)} this week` : 'Start a session'}</b><span className="dim">Deep work, pomodoro style</span></div>
-    </Glance>
+    <>
+      <button type="button" className="row" onClick={() => openLens('attendance')}>
+        <div className="row__main"><div className="row__title row__title--quiet">Attendance</div></div>
+        <Sparkline values={[...rows].sort((a, b) => (a.percentage ?? 0) - (b.percentage ?? 0)).map((r) => r.percentage ?? 0)} />
+        <span className="row__value row__value--sm" style={{ minWidth: 58, textAlign: 'right' }}>{overall == null ? '—' : `${overall.toFixed(1)}%`}</span>
+      </button>
+      <button type="button" className="row" onClick={() => openLens('tasks')}>
+        <div className="row__main"><div className="row__title row__title--quiet">Tasks</div></div>
+        <span className="row__value row__value--sm">{tasks.length ? `${tasks.length} open` : 'clear'}</span>
+      </button>
+      <div className="row">
+        <div className="row__main"><div className="row__title row__title--quiet">{focus ? `Focus · ${focus.subject}` : 'Focus'}</div></div>
+        {focus ? (
+          <button type="button" className="row__value row__value--sm" style={{ color: '#FF6A2B' }} onClick={() => openLens('focus')}>{focusValue}</button>
+        ) : (
+          <button type="button" className="row__btn" onClick={() => send('start focus for 25 minutes')}>Start 25 min</button>
+        )}
+      </div>
+      {money?.total > 0 && (
+        <button type="button" className="row" onClick={() => openLens('money')}>
+          <div className="row__main"><div className="row__title row__title--quiet">Spent this month</div></div>
+          <span className="row__value row__value--sm">{inr(money.total)}</span>
+        </button>
+      )}
+      <button type="button" className="row" onClick={() => openLens('memory')}>
+        <div className="row__main"><div className="row__title row__title--quiet">Memory</div></div>
+        <svg className="ico" viewBox="0 0 24 24" style={{ color: '#B5AC9F' }}><circle cx="6" cy="6" r="2.5" /><circle cx="18" cy="8" r="2.5" /><circle cx="11" cy="18" r="2.5" /><path d="M8.2 7.2 15.6 7.8M7.2 8.3l2.7 7.4M16.8 10.2l-4.4 5.9" /></svg>
+      </button>
+    </>
   );
 }
 
-function MoneyGlance({ active, delay }) {
-  const { data } = useSource('money');
-  return (
-    <Glance lens="money" label="This month" delay={delay} active={active}>
-      <div className="glance__text"><b>{inr(data?.total)}</b><span className="dim">{data?.by_category?.[0] ? `mostly ${data.by_category[0].category}` : 'say “spent 200 on lunch”'}</span></div>
-    </Glance>
-  );
-}
-
-export default function GlanceRail({ activeLens }) {
-  const cards = [
-    ['schedule', NowNext], ['attendance', AttendanceGlance], ['exams', ExamGlance],
-    ['assignments', AssignmentGlance], ['tasks', TaskGlance], ['focus', FocusGlance], ['money', MoneyGlance],
-  ];
+function FullRail() {
+  const { openLens } = useOrbit();
+  const { items } = useAttention();
   return (
     <nav className="rail" aria-label="At a glance">
-      {cards.map(([lens, Card], i) => <Card key={lens} active={activeLens === lens} delay={0.15 + i * 0.05} />)}
+      <div className="x rail__label rise" style={{ '--d': '0.15s' }}>Now</div>
+      <NowCard />
+      <div className="x rail__label rise" style={{ '--d': '0.3s' }}>Needs you</div>
+      <div className="rise" style={{ '--d': '0.35s' }}>
+        {items.length === 0 && <div className="rail__quiet">Nothing needs you right now.</div>}
+        {items.map((it) => (
+          <button key={it.key} type="button" className="row" onClick={() => openLens(it.lens)}>
+            <div className="row__main">
+              <div className="row__title">{it.title}</div>
+              <div className="row__sub">{it.sub}</div>
+            </div>
+            <span className="row__value" style={{ color: it.hot ? '#FF6A2B' : '#E8C27A' }}>{it.value}</span>
+          </button>
+        ))}
+      </div>
+      <div className="x rail__label rise" style={{ '--d': '0.45s' }}>At a glance</div>
+      <div className="rise" style={{ '--d': '0.5s' }}><Glance /></div>
     </nav>
   );
+}
+
+function SlimRail({ activeLens }) {
+  const { openLens } = useOrbit();
+  const now = useNow(60000);
+  const blocks = todaysBlocks(useSource('schedule').data);
+  const rows = useSource('attendance').data?.rows || [];
+  const tasks = useSource('tasks').data?.tasks || [];
+  const pendingCount = (useSource('assignments').data?.pending || []).length;
+  const { exam, overdue } = useAttention();
+  const next = blocks.find((b) => b.e > now);
+  const attended = rows.reduce((s, r) => s + (r.attended_classes || 0), 0);
+  const total = rows.reduce((s, r) => s + (r.total_classes || 0), 0);
+  const examMs = exam ? exam.start - now : 0;
+  const examLabel = exam ? (examMs < DAY ? `${Math.floor(examMs / 3600000)}h${pad(Math.floor((examMs % 3600000) / 60000))}` : `${Math.floor(examMs / DAY)}d`) : '—';
+
+  const stats = [
+    ['schedule', next ? hm(next.s) : 'free', next ? shortCourse(next.title).slice(0, 7) : 'Today', null],
+    ['exams', examLabel, exam ? exam.exam_type : 'Exams', exam && examMs < 2 * DAY ? '#FF6A2B' : null],
+    ['attendance', total ? ((attended / total) * 100).toFixed(1) : '—', 'Att', null],
+    ['assignments', String(overdue || pendingCount), 'LMS', overdue ? '#E8C27A' : null],
+    ['tasks', String(tasks.length), 'Tasks', null],
+  ];
+  return (
+    <nav className="slim" aria-label="At a glance">
+      {stats.map(([lens, value, label, color]) => (
+        <button key={lens} type="button" className={`slim__stat ${activeLens === lens ? 'is-active' : ''}`} onClick={() => openLens(lens)} aria-label={`${label} ${value}`}>
+          <b style={color ? { color } : undefined}>{value}</b>
+          <span className="x">{label}</span>
+        </button>
+      ))}
+      <button type="button" className={`slim__stat ${activeLens === 'memory' ? 'is-active' : ''}`} onClick={() => openLens('memory')} aria-label="Memory">
+        <svg className="ico" viewBox="0 0 24 24" style={{ color: '#B5AC9F', width: 18, height: 18 }}><circle cx="6" cy="6" r="2.5" /><circle cx="18" cy="8" r="2.5" /><circle cx="11" cy="18" r="2.5" /><path d="M8.2 7.2 15.6 7.8M7.2 8.3l2.7 7.4M16.8 10.2l-4.4 5.9" /></svg>
+        <span className="x">Memory</span>
+      </button>
+    </nav>
+  );
+}
+
+export default function GlanceRail({ activeLens, docked }) {
+  return docked ? <SlimRail activeLens={activeLens} /> : <FullRail />;
 }
