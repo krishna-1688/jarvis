@@ -671,11 +671,22 @@ def detect_alias_merchant_intent(text: str) -> tuple | None:
 _REMEMBER_FACT_RE = re.compile(
     r"^(?:remember|note\s+down|keep\s+in\s+mind|don't\s+forget|dont\s+forget)\s+(?:that\s+)?(?!to\s)(.{4,})$"
 )
-_RECALL_FACTS_PHRASES = ("what do you remember", "what do you know about me", "what have i told you",
-                         "what did i ask you to remember")
+_RECALL_FACTS_PHRASES = ("what do you remember about me", "what do you know about me", "what do you know about myself", "what have i told you",
+                         "what did i ask you to remember", "what do you remember")
+_MEMORY_ABOUT_RE = re.compile(r"^what (?:do|else do) you (?:know|remember) about (?!me\b|myself\b)(.{2,60})$")
+_FORGET_ABOUT_RE = re.compile(r"^forget (?:everything |all |anything )?(?:you know |you remember )?about (.{2,60})$")
+_FORGET_LAST_RE = re.compile(r"^(?:forget|delete|erase) (?:that|it|what i (?:just )?(?:said|told you))$|^never ?mind,? forget (?:that|it)$")
 
 def detect_memory_intent(text: str) -> tuple | None:
     t = _strip_lead_filler(text.lower()).rstrip("?.! ")
+    m = _FORGET_ABOUT_RE.match(t)
+    if m:
+        return "forget_about", {"subject": m.group(1).strip()}
+    if _FORGET_LAST_RE.match(t):
+        return "forget_last", {}
+    m = _MEMORY_ABOUT_RE.match(t)
+    if m:
+        return "memory_about", {"subject": m.group(1).strip()}
     if _has_any(t, _RECALL_FACTS_PHRASES):
         return "recall_facts", {}
     m = _REMEMBER_FACT_RE.match(t)
@@ -1297,8 +1308,20 @@ def _offline_fallback(text: str) -> tuple:
     obvious personal data questions by keyword; everything else goes to
     the brain (which has its own model fallback chain)."""
     t = text.lower()
+    # Only short, personal data questions ("when's my next exam") go to a
+    # feature by keyword. Knowledge/advice questions and long musings that
+    # merely mention a keyword ("what is a CAT exam at VIT", "tips to
+    # prepare for CAT2", a career ramble mentioning exams) used to be sent
+    # to the exams feature whenever the classifier was rate-limited.
+    looks_like_data_question = (
+        len(t.split()) <= 12
+        and _PERSONAL_RE.search(t)
+        and not _is_impersonal_question(t)
+        and not _has_any(t, ("tips", "tip", "prepare", "preparation", "plan", "how to", "how should", "advice",
+                             "what is", "what are", "explain"))
+    )
     for keywords, category in _KEYWORD_DATA_FALLBACKS:
-        if _has_any(t, keywords):
+        if looks_like_data_question and _has_any(t, keywords):
             return category, {}
     if _PERSONAL_RE.search(t) and _has_any(t, ("schedule", "class", "classes", "free", "plan")):
         match = _time_word_fallback(t)

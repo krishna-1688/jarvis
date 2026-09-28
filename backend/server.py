@@ -132,23 +132,107 @@ def handle_open_dashboard(user_input: str, payload: dict) -> FeatureResult:
 
 
 def handle_remember_fact(user_input: str, payload: dict) -> FeatureResult:
-    """"remember that my birthday is May 5" — stored in semantic memory
-    and recalled into chat context when a later question is related."""
-    from core.memory import remember_fact
+    """"remember that my birthday is 6 May" — stored in the memory graph,
+    replacing an older value for the same thing, and linked to whatever
+    it mentions so it comes up when a related question does."""
+    from core.graph import get_graph
     fact = (payload or {}).get("fact") or user_input
-    remember_fact(fact)
-    msg = "Noted, boss. I'll remember that."
-    return FeatureResult(ok=True, data={"fact": fact}, display=msg, spoken=msg)
+    replaced = get_graph().remember(fact)
+    if replaced:
+        msg = f"Updated, boss. I had \"{replaced[-1]}\" before — I'll go with this now."
+    else:
+        msg = "Noted, boss. I'll remember that."
+    return FeatureResult(ok=True, data={"fact": fact, "replaced": replaced}, display=msg, spoken=msg)
+
 
 def handle_recall_facts(user_input: str, payload: dict) -> FeatureResult:
-    from core.memory import list_facts
-    facts = list_facts()
-    if not facts:
-        msg = "You haven't asked me to remember anything yet. Say 'remember that ...' and I will."
+    """"what do you know about me" — facts, habits and what comes up most."""
+    from core.graph import get_graph
+    graph = get_graph()
+    facts = graph.active_facts()
+    conn = graph._reader()
+    habits = graph.habits_line(conn)
+    # mentions weighted by recency (30-day half-life): what you talk about
+    # NOW, not courses from two semesters ago.
+    import math as _math
+    now = time.time()
+    rows = conn.execute("SELECT label, mentions, last_seen FROM nodes WHERE kind IN ('course','person','exam')").fetchall()
+    top = [r[0] for r in sorted(rows, key=lambda r: -r[1] * _math.pow(0.5, (now - r[2]) / 86400 / 30))[:4]]
+    if not facts and not top:
+        msg = "Not much yet — say 'remember that ...' and I will, and I'll pick things up as we talk."
         return FeatureResult(ok=True, data={"facts": []}, display=msg, spoken=msg)
-    display = "Here's what you've asked me to remember:\n" + "\n".join(f"- {f}" for f in facts)
-    spoken = f"You've told me {len(facts)} thing{'s' if len(facts) != 1 else ''}. " + "; ".join(facts[:3])
-    return FeatureResult(ok=True, data={"facts": facts}, display=display, spoken=spoken)
+    lines = []
+    if facts:
+        lines.append("You told me:\n" + "\n".join(f"- {f}" for f in facts))
+    if top:
+        lines.append("You bring up most: " + ", ".join(top))
+    if habits:
+        lines.append(habits.replace("Habit: KK usually", "You usually"))
+    spoken_bits = []
+    if facts:
+        spoken_bits.append(f"You've told me {len(facts)} thing{'s' if len(facts) != 1 else ''}: " + "; ".join(facts[:3]) + ".")
+    if top:
+        spoken_bits.append("You talk about " + ", ".join(top[:3]) + " the most.")
+    return FeatureResult(ok=True, data={"facts": facts, "top": top}, display="\n\n".join(lines),
+                         spoken=" ".join(spoken_bits))
+
+
+def handle_memory_about(user_input: str, payload: dict) -> FeatureResult:
+    from core.graph import get_graph
+    subject = (payload or {}).get("subject") or user_input
+    info = get_graph().describe(subject)
+    if not info:
+        msg = f"Nothing about {subject} in my memory yet."
+        return FeatureResult(ok=True, data={}, display=msg, spoken=msg)
+    parts = [f"{info['label']} — mentioned in {info['events']} conversation{'s' if info['events'] != 1 else ''}."]
+    if info["links"]:
+        parts.append("Connected to: " + ", ".join(info["links"]) + ".")
+    display = " ".join(parts)
+    if info["recent"]:
+        display += "\n\nRecently:\n" + "\n".join(f"- {when}: {text}" for when, text in info["recent"])
+    return FeatureResult(ok=True, data={"memory": info}, display=display, spoken=" ".join(parts))
+
+
+def handle_forget_last(user_input: str, payload: dict) -> FeatureResult:
+    from core.graph import get_graph
+    forgotten = get_graph().forget_last_fact()
+    msg = f"Forgotten: \"{forgotten}\"." if forgotten else "There's nothing you've asked me to remember yet."
+    return FeatureResult(ok=True, data={}, display=msg, spoken=msg)
+
+
+# "forget everything about X" deletes real history, and a misheard voice
+# command shouldn't be able to do that silently — it asks first.
+_pending_forget = {"subject": None}
+
+
+def handle_forget_about(user_input: str, payload: dict) -> FeatureResult:
+    from core.graph import get_graph
+    subject = (payload or {}).get("subject") or ""
+    info = get_graph().describe(subject)
+    if not info:
+        msg = f"I don't have anything about {subject}."
+        return FeatureResult(ok=True, data={}, display=msg, spoken=msg)
+    _pending_forget["subject"] = subject
+    msg = (f"Forget {info['label']} and the {info['events']} conversation"
+           f"{'s' if info['events'] != 1 else ''} about it? Say yes to confirm.")
+    return FeatureResult(ok=True, data={}, display=msg, spoken=msg)
+
+
+def handle_forget_confirm_followup(user_input: str) -> FeatureResult | None:
+    subject = _pending_forget["subject"]
+    if not subject:
+        return None
+    _pending_forget["subject"] = None
+    if _is_affirmative(user_input):
+        from core.graph import get_graph
+        removed = get_graph().forget_about(subject)
+        msg = f"Done — forgot {subject} ({removed} memories removed)."
+        return FeatureResult(ok=True, data={}, display=msg, spoken=msg)
+    if _is_negative(user_input):
+        msg = "Okay, keeping it."
+        return FeatureResult(ok=True, data={}, display=msg, spoken=msg)
+    return None
+
 
 def _handle_timetable(mode: str):
     """Builds a (user_input, payload) handler for a fixed timetable query mode."""
@@ -825,6 +909,9 @@ INTENT_HANDLERS = {
     "alias_add":          handle_alias_add,
     "alias_merchant":     handle_alias_merchant,
     "remember_fact":      handle_remember_fact,
+    "memory_about":       handle_memory_about,
+    "forget_last":        handle_forget_last,
+    "forget_about":       handle_forget_about,
     "open_dashboard":     handle_open_dashboard,
     "recall_facts":       handle_recall_facts,
     "timetable_today":    handle_timetable_today,
@@ -895,6 +982,14 @@ def process(user_input: str) -> dict:
             "data": followup.data, "error": followup.error, "expecting_confirmation": expecting,
         }
 
+    forget_followup = handle_forget_confirm_followup(user_input)
+    if forget_followup is not None:
+        return {
+            "ok": forget_followup.ok, "display": forget_followup.display, "spoken": forget_followup.spoken,
+            "data": forget_followup.data, "error": forget_followup.error, "expecting_confirmation": False,
+            "_category": "forget_about", "_payload": {},
+        }
+
     schedule_followup = handle_schedule_confirm_followup(user_input)
     if schedule_followup is not None:
         expecting = _pending_schedule_confirm["data"] is not None
@@ -928,11 +1023,13 @@ def process(user_input: str) -> dict:
     expecting = (
         _pending_whatsapp_confirm["data"] is not None
         or _pending_schedule_confirm["data"] is not None
+        or _pending_forget["subject"] is not None
         or has_pending_system_action()
     )
     return {
         "ok": result.ok, "display": result.display, "spoken": result.spoken,
         "data": result.data, "error": result.error, "expecting_confirmation": expecting,
+        "_category": category, "_payload": payload if isinstance(payload, dict) else {},
     }
 
 
@@ -1179,7 +1276,34 @@ def startup_checks_worker():
     startup_staleness_check()
 
 
+def memory_maintenance_worker():
+    """Loads the memory graph off the request path at startup (first run
+    also migrates old facts/conversations), then every night at 3:30:
+    prunes faded links, caps over-connected nodes, and takes a backup
+    (7 kept). Runs once at startup too if today has no backup yet."""
+    from core.graph import get_graph, BACKUP_DIR
+    try:
+        graph = get_graph()
+        today = f"memory_graph-{datetime.now():%Y%m%d}.db"
+        if not os.path.exists(os.path.join(BACKUP_DIR, today)):
+            graph.backup()
+    except Exception as e:
+        print(f"⚠️ Memory startup error: {e}")
+    while not _shutdown.is_set():
+        _shutdown.wait(_seconds_until_next([(3, 30)]))
+        if _shutdown.is_set():
+            break
+        try:
+            graph = get_graph()
+            stats = graph.maintain()
+            path = graph.backup()
+            print(f"🧠 Memory maintenance: {stats}, backup {os.path.basename(path)}")
+        except Exception as e:
+            print(f"⚠️ Memory maintenance error: {e}")
+
+
 def _start_background_workers():
+    threading.Thread(target=memory_maintenance_worker, daemon=True).start()
     threading.Thread(target=startup_checks_worker, daemon=True).start()
     threading.Thread(target=daily_sync_worker, daemon=True).start()
     threading.Thread(target=lms_reminder_worker, daemon=True).start()
@@ -1253,6 +1377,12 @@ def _on_startup():
 def _on_shutdown():
     _shutdown.set()
     try:
+        from core import graph as _graph
+        if _graph._instance is not None:
+            _graph._instance.close()   # flush queued memory writes
+    except Exception:
+        pass
+    try:
         from features.web_control import save_browser_session
         save_browser_session()
     except Exception:
@@ -1320,11 +1450,30 @@ def dashboard_auto_open():
     return {"opened": ok, "reason": msg}
 
 
+# Turns that are ABOUT memory aren't recorded in it: "forget everything
+# about X" would otherwise recreate X the moment it was deleted.
+_NOT_REMEMBERED = {"forget_about", "forget_last", "memory_about", "recall_facts", "remember_fact",
+                   "system_shutdown"}
+
+
+def _observe_in_memory(text: str, source: str, result: dict):
+    category = result.pop("_category", "")
+    payload = result.pop("_payload", {})
+    if category in _NOT_REMEMBERED or not (text or "").strip():
+        return
+    try:
+        from core.graph import get_graph
+        get_graph().observe(text, category, payload, result, via="voice" if source == "voice" else "text")
+    except Exception as e:
+        print(f"[memory] couldn't record turn: {e}")
+
+
 @app.post("/command", response_model=CommandResponse)
 def command(req: CommandRequest):
     try:
         result = process(req.text)
         _log_turn(req.text, req.source, result)
+        _observe_in_memory(req.text, req.source, result)
         if req.source == "voice":
             from core.ws_hub import broadcast
             broadcast({

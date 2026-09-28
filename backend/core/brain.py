@@ -300,7 +300,12 @@ def ask_groq(user_input: str, extra_context: str = "", max_tokens_override: int 
     # Recalled long-term memory — build_context only returns entries that
     # are actually close to this message (see its relevance cut-off).
     if not extra_context:
-        mem = build_context(user_input)
+        try:
+            from core.graph import get_graph
+            mem = get_graph().recall(user_input)
+        except Exception as e:
+            print(f"[brain] memory graph recall failed, using plain search: {e}")
+            mem = build_context(user_input)
         if mem:
             messages.append({
                 "role": "system",

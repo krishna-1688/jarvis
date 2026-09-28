@@ -57,7 +57,20 @@ def _cool_down(model: str, seconds: float, why: str):
     print(f"[llm] {model} unavailable for {seconds:.0f}s ({why})")
 
 
+_TRY_AGAIN_RE = re.compile(r"try again in (?:(\d+)h)?(?:(\d+)m)?(?:([\d.]+)s)?", re.IGNORECASE)
+
+
 def _retry_after(exc) -> float:
+    # A per-DAY cap (tokens/requests per day) is not a blip: retrying every
+    # 2 minutes just burns requests until the quota refills. Honour Groq's
+    # own "try again in 1h2m3s" for those, instead of the per-minute cap.
+    msg = str(exc)
+    if "per day" in msg:
+        m = _TRY_AGAIN_RE.search(msg)
+        if m and any(m.groups()):
+            h, mi, s = (float(g) if g else 0.0 for g in m.groups())
+            return max(60.0, h * 3600 + mi * 60 + s)
+        return 1800.0
     try:
         value = exc.response.headers.get("retry-after")
         return max(2.0, min(float(value), 120.0))
@@ -71,10 +84,35 @@ def _model_params(model: str, max_tokens: int) -> dict:
     return {"max_tokens": max_tokens}
 
 
+# If every model is only briefly rate-limited (Groq's per-minute token
+# caps typically clear in 2-6 s), waiting once beats answering "give me a
+# sec" — measured: most cooldowns in a heavy test run were 2-6 s.
+SHORT_WAIT_MAX_S = 6.0
+
+
+def _shortest_cooldown(role: str) -> float:
+    now = time.time()
+    with _cooldown_lock:
+        waits = [_cooldown_until.get(m, 0) - now for m in _ROLE_MODELS[role]]
+    return max(0.0, min(waits)) if waits else 0.0
+
+
 def complete(messages: list, *, role: str = "chat", max_tokens: int = 300,
              temperature: float = 0.4, json_mode: bool = False) -> str:
     """Returns the model's text reply. Raises LLMUnavailable only when
-    every model in the role's chain failed."""
+    every model in the role's chain failed (after one short wait if they
+    were all just briefly rate-limited)."""
+    try:
+        return _complete_once(messages, role, max_tokens, temperature, json_mode)
+    except LLMUnavailable:
+        wait = _shortest_cooldown(role)
+        if 0 < wait <= SHORT_WAIT_MAX_S:
+            time.sleep(wait + 0.2)
+            return _complete_once(messages, role, max_tokens, temperature, json_mode)
+        raise
+
+
+def _complete_once(messages, role, max_tokens, temperature, json_mode) -> str:
     last_error = "no model configured"
     for model in _ROLE_MODELS[role]:
         if _in_cooldown(model):

@@ -18,7 +18,8 @@ from datetime import datetime, timedelta
 
 # ── Paths ──────────────────────────────────────────────
 BASE_DIR    = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DB_PATH     = os.path.join(BASE_DIR, "data", "database", "jarvis.db")
+# JARVIS_DB lets tests run against a copy instead of your real data.
+DB_PATH     = os.environ.get("JARVIS_DB") or os.path.join(BASE_DIR, "data", "database", "jarvis.db")
 
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
@@ -554,6 +555,7 @@ def sync_course_aliases(courses: list):
     taught (see add_course_alias) or a hand-edited short_name survives
     every future sync.
     """
+    _invalidate_alias_cache()
     conn = get_db()
     for course_code, course_name in courses:
         course_code = (course_code or "").strip()
@@ -569,7 +571,21 @@ def sync_course_aliases(courses: list):
     conn.close()
 
 
+# Read on nearly every turn (router, course resolver, memory graph); the
+# table only changes on a VTOP sync or a taught alias, both of which clear
+# this cache.
+_ALIAS_CACHE = {"at": 0.0, "rows": None}
+_ALIAS_CACHE_TTL_S = 300
+
+
+def _invalidate_alias_cache():
+    _ALIAS_CACHE["rows"] = None
+
+
 def get_all_course_aliases() -> list:
+    import time as _time
+    if _ALIAS_CACHE["rows"] is not None and _time.time() - _ALIAS_CACHE["at"] < _ALIAS_CACHE_TTL_S:
+        return _ALIAS_CACHE["rows"]
     conn = get_db()
     rows = conn.execute("SELECT * FROM course_aliases").fetchall()
     conn.close()
@@ -581,6 +597,7 @@ def get_all_course_aliases() -> list:
         except (json.JSONDecodeError, TypeError):
             d["aliases"] = []
         out.append(d)
+    _ALIAS_CACHE.update(at=_time.time(), rows=out)
     return out
 
 
@@ -588,6 +605,7 @@ def add_course_alias(course_code: str, new_alias: str) -> bool:
     """Appends a user-taught alias ('remember DAA means Design and
     Analysis') to that course's aliases JSON array. Returns False if
     course_code isn't a known course."""
+    _invalidate_alias_cache()
     new_alias = (new_alias or "").strip()
     if not new_alias:
         return False
