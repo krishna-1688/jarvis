@@ -677,6 +677,26 @@ _MEMORY_ABOUT_RE = re.compile(r"^what (?:do|else do) you (?:know|remember) about
 _FORGET_ABOUT_RE = re.compile(r"^forget (?:everything |all |anything )?(?:you know |you remember )?about (.{2,60})$")
 _FORGET_LAST_RE = re.compile(r"^(?:forget|delete|erase) (?:that|it|what i (?:just )?(?:said|told you))$|^never ?mind,? forget (?:that|it)$")
 
+# "what's on my screen", "can you see my screen", "explain this error on
+# the screen". Not screen SETTINGS (brightness, lock, turn off) and not
+# requests to SHOW something on screen — those belong to pc / dashboard.
+_SCREEN_ASK_RE = re.compile(
+    r"\b(?:on|in)\s+(?:my|the|this)\s+screen\b"
+    r"|\b(?:look|looking|see|read|check|scan|describe|explain|summari[sz]e)\s+(?:at\s+)?(?:my|the|this)\s+screen\b"
+    r"|^what am i (?:looking at|seeing)(?:\s+(?:right\s+)?now)?$"
+)
+_SCREEN_NOT_RE = re.compile(
+    r"\b(?:brightness|lock|unlock|record|recording|share|sharing|mirror|cast|timeout|saver|resolution|screenshot)\b"
+    r"|\b(?:turn|switch|put|show|display|open|pull|bring)\b"
+)
+
+def detect_screen_intent(text: str) -> tuple | None:
+    t = _strip_lead_filler(text.lower()).rstrip("?.! ")
+    if _SCREEN_ASK_RE.search(t) and not _SCREEN_NOT_RE.search(t):
+        return "screen", {"question": text.strip()}
+    return None
+
+
 def detect_memory_intent(text: str) -> tuple | None:
     t = _strip_lead_filler(text.lower()).rstrip("?.! ")
     m = _FORGET_ABOUT_RE.match(t)
@@ -785,6 +805,10 @@ def fast_path_route(text: str) -> tuple | None:
     spotify_match = detect_spotify_intent(text)
     if spotify_match:
         return spotify_match
+
+    screen_match = detect_screen_intent(text)
+    if screen_match:
+        return screen_match
 
     # Plain chat / knowledge questions go straight to the brain — this is
     # what stops "explain cpu scheduling" becoming a CPU-usage readout.
@@ -1154,6 +1178,7 @@ GROQ_INTENTS = {
     "system_shutdown":  "shut down/exit Jarvis itself",
     "spotify":          "Spotify playback: play/open/pause/resume/skip/volume/now playing",
     "pc":               "control THIS PC: volume, mute, screenshot, brightness, open/close apps, battery/CPU/RAM/disk, clipboard, windows, shutdown/restart/sleep the PC",
+    "screen":           "look at KK's screen right now: what's on it, read/explain/summarise something visible on it",
     "web":              "browse: open/search a website, compare sites, summarize/scroll/click the open page",
     "whatsapp":         "send a WhatsApp message to someone",
     "vtop_marks":       "my assessment marks (CAT/FAT/assignment) in a course",

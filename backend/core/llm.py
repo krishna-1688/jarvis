@@ -8,7 +8,8 @@ into "just chat" — routing was silently dead with nothing in the logs but
 a one-line print per request.
 
 Here every call walks an ordered model chain (config.CHAT_MODELS /
-CLASSIFIER_MODELS). A model that is rate limited is skipped until its
+CLASSIFIER_MODELS). Entries prefixed "gemini:" go to Google's
+OpenAI-compatible Gemini endpoint instead of Groq — a separate free quota. A model that is rate limited is skipped until its
 retry-after passes; a model that is retired/unknown is skipped for an
 hour. Callers get text back or LLMUnavailable, never a half-parsed error.
 """
@@ -19,11 +20,15 @@ import threading
 import time
 
 import groq
+import httpx
 from groq import Groq
 
-from config import GROQ_API_KEY, CHAT_MODELS, CLASSIFIER_MODELS, VISION_MODELS
+from config import GROQ_API_KEY, GEMINI_API_KEY, CHAT_MODELS, CLASSIFIER_MODELS, VISION_MODELS
 
 _client = Groq(api_key=GROQ_API_KEY, max_retries=0, timeout=12.0)
+
+_GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+_gemini_http: httpx.Client | None = None  # created on first Gemini call
 
 _ROLE_MODELS = {
     "chat": CHAT_MODELS,
@@ -46,6 +51,12 @@ class LLMUnavailable(Exception):
     pass
 
 
+class _GeminiError(Exception):
+    def __init__(self, status: int, message: str):
+        super().__init__(f"Gemini {status}: {message}")
+        self.status = status
+
+
 def _in_cooldown(model: str) -> bool:
     with _cooldown_lock:
         return _cooldown_until.get(model, 0) > time.time()
@@ -60,11 +71,21 @@ def _cool_down(model: str, seconds: float, why: str):
 _TRY_AGAIN_RE = re.compile(r"try again in (?:(\d+)h)?(?:(\d+)m)?(?:([\d.]+)s)?", re.IGNORECASE)
 
 
+_GEMINI_RETRY_RE = re.compile(r"retry in ([\d.]+)s", re.IGNORECASE)
+
+
 def _retry_after(exc) -> float:
     # A per-DAY cap (tokens/requests per day) is not a blip: retrying every
     # 2 minutes just burns requests until the quota refills. Honour Groq's
     # own "try again in 1h2m3s" for those, instead of the per-minute cap.
     msg = str(exc)
+    if isinstance(exc, _GeminiError):
+        # Gemini names the quota ("...PerDay...") and says "retry in 23.4s";
+        # a daily free-tier quota resets at midnight Pacific, so rest an hour.
+        if "perday" in msg.lower().replace(" ", ""):
+            return 3600.0
+        m = _GEMINI_RETRY_RE.search(msg)
+        return max(2.0, min(float(m.group(1)), 120.0)) if m else 30.0
     if "per day" in msg:
         m = _TRY_AGAIN_RE.search(msg)
         if m and any(m.groups()):
@@ -79,6 +100,9 @@ def _retry_after(exc) -> float:
 
 
 def _model_params(model: str, max_tokens: int) -> dict:
+    if model.startswith("gemini:"):
+        # Lite models accept "minimal" thinking (~2 s replies); others reject it.
+        return {"reasoning_effort": "minimal" if "lite" in model else "low", "max_tokens": max_tokens + 200}
     if model.startswith("openai/gpt-oss"):
         return {"reasoning_effort": "low", "max_tokens": max_tokens + _REASONING_HEADROOM}
     return {"max_tokens": max_tokens}
@@ -90,7 +114,7 @@ def _model_params(model: str, max_tokens: int) -> dict:
 SHORT_WAIT_MAX_S = 6.0
 
 
-def _shortest_cooldown(role: str) -> float:
+def shortest_cooldown(role: str) -> float:
     now = time.time()
     with _cooldown_lock:
         waits = [_cooldown_until.get(m, 0) - now for m in _ROLE_MODELS[role]]
@@ -105,7 +129,7 @@ def complete(messages: list, *, role: str = "chat", max_tokens: int = 300,
     try:
         return _complete_once(messages, role, max_tokens, temperature, json_mode)
     except LLMUnavailable:
-        wait = _shortest_cooldown(role)
+        wait = shortest_cooldown(role)
         if 0 < wait <= SHORT_WAIT_MAX_S:
             time.sleep(wait + 0.2)
             return _complete_once(messages, role, max_tokens, temperature, json_mode)
@@ -122,13 +146,25 @@ def _complete_once(messages, role, max_tokens, temperature, json_mode) -> str:
         if json_mode:
             kwargs["response_format"] = {"type": "json_object"}
         try:
-            response = _client.chat.completions.create(
-                model=model, messages=messages, temperature=temperature, **kwargs,
-            )
-            text = _THINK_RE.sub("", response.choices[0].message.content or "").strip()
+            if model.startswith("gemini:"):
+                content = _gemini_create(model[len("gemini:"):], messages, temperature, kwargs)
+            else:
+                response = _client.chat.completions.create(
+                    model=model, messages=messages, temperature=temperature, **kwargs,
+                )
+                content = response.choices[0].message.content
+            text = _THINK_RE.sub("", content or "").strip()
             if text:
                 return text
             last_error = f"{model} returned empty content"
+        except _GeminiError as e:
+            if e.status == 429:
+                _cool_down(model, _retry_after(e), "rate limited")
+            elif e.status == 404:
+                _cool_down(model, 3600, "model not found / retired")
+            elif e.status >= 500:
+                _cool_down(model, 30, "overloaded")
+            last_error = str(e)
         except groq.RateLimitError as e:
             _cool_down(model, _retry_after(e), "rate limited")
             last_error = str(e)
@@ -145,6 +181,19 @@ def _complete_once(messages, role, max_tokens, temperature, json_mode) -> str:
         except Exception as e:
             last_error = str(e)
     raise LLMUnavailable(last_error)
+
+
+def _gemini_create(model: str, messages: list, temperature: float, kwargs: dict) -> str:
+    global _gemini_http
+    if not GEMINI_API_KEY:
+        raise _GeminiError(401, "GEMINI_API_KEY not set")
+    if _gemini_http is None:
+        _gemini_http = httpx.Client(timeout=15.0, headers={"Authorization": f"Bearer {GEMINI_API_KEY}"})
+    r = _gemini_http.post(_GEMINI_URL, json={"model": model, "messages": messages,
+                                             "temperature": temperature, **kwargs})
+    if r.status_code != 200:
+        raise _GeminiError(r.status_code, r.text[:400])
+    return r.json()["choices"][0]["message"].get("content") or ""
 
 
 def complete_json(messages: list, *, role: str = "classifier", max_tokens: int = 200) -> dict:

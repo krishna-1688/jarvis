@@ -521,6 +521,14 @@ def handle_alias_merchant(user_input: str, payload: dict) -> FeatureResult:
 #   PC HANDLER
 # ══════════════════════════════════════════
 
+def handle_screen(user_input: str, payload: dict) -> FeatureResult:
+    if not (_device_state["lid_open"] and _device_state["display_on"]):
+        msg = "Your screen is off right now, so there's nothing for me to look at."
+        return FeatureResult(ok=True, data={}, display=msg, spoken=msg)
+    from features.screen_vision import describe_screen
+    return describe_screen((payload or {}).get("question") or user_input)
+
+
 def handle_pc(user_input: str, payload: dict) -> FeatureResult | None:
     """
     payload is now just Groq's (usually empty) entities dict — the
@@ -898,6 +906,7 @@ def handle_web(user_input: str, payload: dict) -> FeatureResult | None:
 
 INTENT_HANDLERS = {
     "pc":                 handle_pc,
+    "screen":             handle_screen,
     "vtop_marks":         handle_marks,
     "vtop_fetch_marks":   handle_vtop_fetch,
     "whatsapp":           handle_whatsapp,
@@ -1453,7 +1462,7 @@ def dashboard_auto_open():
 # Turns that are ABOUT memory aren't recorded in it: "forget everything
 # about X" would otherwise recreate X the moment it was deleted.
 _NOT_REMEMBERED = {"forget_about", "forget_last", "memory_about", "recall_facts", "remember_fact",
-                   "system_shutdown"}
+                   "system_shutdown", "screen"}
 
 
 def _observe_in_memory(text: str, source: str, result: dict):

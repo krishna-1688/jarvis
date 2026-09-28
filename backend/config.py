@@ -18,7 +18,7 @@ def _require(name: str) -> str:
 # Required — used by currently-active features.
 GROQ_API_KEY = _require("GROQ_API_KEY")
 
-# Optional — not used by any active feature yet.
+# Optional — Gemini is the fallback provider when Groq's quota runs out.
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
 OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY")
@@ -43,17 +43,26 @@ PORCUPINE_API_KEY = os.getenv("PORCUPINE_API_KEY")
 def _model_list(env_name: str, default: str) -> list:
     return [m.strip() for m in os.getenv(env_name, default).split(",") if m.strip()]
 
+# Gemini (free AI Studio key) has its own quota, separate from Groq's
+# 200k-tokens-per-model-per-day cap, so it goes at the END of each chain:
+# used only once every Groq model is rate limited. "gemini:" tells
+# core/llm.py which provider to call. Only the Lite models answer in ~2 s;
+# full Flash took 6-10 s in testing, too slow for voice.
+_GEMINI_FALLBACK = "gemini:gemini-3.5-flash-lite,gemini:gemini-flash-lite-latest" if GEMINI_API_KEY else ""
+
 # Conversational replies — quality matters most.
-CHAT_MODELS = _model_list("GROQ_CHAT_MODELS", "openai/gpt-oss-120b,qwen/qwen3.8-27b,openai/gpt-oss-20b")
+CHAT_MODELS = (_model_list("GROQ_CHAT_MODELS", "openai/gpt-oss-120b,qwen/qwen3.8-27b,openai/gpt-oss-20b")
+               + _model_list("GEMINI_CHAT_MODELS", _GEMINI_FALLBACK))
 # Intent routing / entity extraction — short JSON output, latency matters.
-CLASSIFIER_MODELS = _model_list("GROQ_CLASSIFIER_MODELS", "qwen/qwen3.8-27b,openai/gpt-oss-20b,openai/gpt-oss-120b")
-# VTOP captcha reading (needs image input).
-VISION_MODELS = _model_list("GROQ_VISION_MODELS", "qwen/qwen3.8-27b")
+CLASSIFIER_MODELS = (_model_list("GROQ_CLASSIFIER_MODELS", "qwen/qwen3.8-27b,openai/gpt-oss-20b,openai/gpt-oss-120b")
+                     + _model_list("GEMINI_CLASSIFIER_MODELS", _GEMINI_FALLBACK))
+# Image input: VTOP captcha reading and "what's on my screen".
+VISION_MODELS = (_model_list("GROQ_VISION_MODELS", "qwen/qwen3.8-27b")
+                 + _model_list("GEMINI_VISION_MODELS", _GEMINI_FALLBACK))
 
 # Back-compat names for any code still reading a single model.
 GROQ_MODEL = CHAT_MODELS[0]
 GROQ_CLASSIFIER_MODEL = CLASSIFIER_MODELS[0]
-GEMINI_MODEL = "gemini-1.5-flash"
 WHISPER_MODEL = "whisper-large-v3"
 
 # ── User Settings ────────────────────────
