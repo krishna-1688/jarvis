@@ -24,34 +24,63 @@ RATE = 16000
 CHUNK = 1280  # 80 ms — what openWakeWord expects per prediction
 
 
+class _Decimator:
+    """Integer-factor downsampler (48 kHz -> 16 kHz for WASAPI, which won't
+    resample for us — see core/audio_device.py). A windowed-sinc low-pass
+    cut at 7.6 kHz runs continuously across chunks (the filter's tail is
+    carried between calls, so chunk boundaries never click), then every
+    `factor`-th sample is kept. numpy only: ~0.1 ms per 80 ms chunk, no
+    scipy import in the always-on voice process."""
+
+    def __init__(self, factor: int, taps: int = 97):
+        n = np.arange(taps) - (taps - 1) / 2
+        cutoff = 0.95 * 0.5 / factor  # in cycles per input sample
+        h = 2 * cutoff * np.sinc(2 * cutoff * n) * np.hamming(taps)
+        self._h = (h / h.sum()).astype(np.float32)
+        self._factor = factor
+        self._tail = np.zeros(taps - 1, dtype=np.float32)
+
+    def __call__(self, x: np.ndarray) -> np.ndarray:
+        buf = np.concatenate([self._tail, x.astype(np.float32)])
+        y = np.convolve(buf, self._h, mode="valid")  # len(y) == len(x)
+        self._tail = buf[-(len(self._h) - 1):]
+        # len(x) is always a multiple of factor, so this keeps sample phase.
+        return np.clip(np.round(y[::self._factor]), -32768, 32767).astype(np.int16)
+
+
 class Mic:
     def __init__(self, should_stop=lambda: False):
         self._should_stop = should_stop
         self._pa = None
         self._stream = None
         self._failures = 0
+        self._factor = 1
+        self._down = None
 
     def _open(self, reprobe: bool = False):
         import pyaudio
-        from core.audio_device import get_input_device_index
+        from core.audio_device import select_input
         self.close()
+        index, rate = select_input(refresh=reprobe)
+        self._factor = max(1, rate // RATE)
+        self._down = _Decimator(self._factor) if self._factor > 1 else None
         self._pa = pyaudio.PyAudio()
         self._stream = self._pa.open(
-            format=pyaudio.paInt16, channels=1, rate=RATE, input=True,
-            input_device_index=get_input_device_index(refresh=reprobe),
-            frames_per_buffer=CHUNK,
+            format=pyaudio.paInt16, channels=1, rate=RATE * self._factor, input=True,
+            input_device_index=index, frames_per_buffer=CHUNK * self._factor,
         )
 
     def read(self) -> np.ndarray:
-        """Next 80 ms of audio. Blocks (without spinning) until the device
-        works again if it has failed."""
+        """Next 80 ms of 16 kHz audio. Blocks (without spinning) until the
+        device works again if it has failed."""
         while not self._should_stop():
             try:
                 if self._stream is None:
                     self._open(reprobe=self._failures > 0)
-                data = self._stream.read(CHUNK, exception_on_overflow=False)
+                data = self._stream.read(CHUNK * self._factor, exception_on_overflow=False)
                 self._failures = 0
-                return np.frombuffer(data, dtype=np.int16)
+                audio = np.frombuffer(data, dtype=np.int16)
+                return self._down(audio) if self._down else audio
             except Exception as e:
                 self._failures += 1
                 wait = min(30, 2 ** min(self._failures, 5))
@@ -68,6 +97,8 @@ class Mic:
                 avail = self._stream.get_read_available()
                 if avail:
                     self._stream.read(avail, exception_on_overflow=False)
+            if self._down is not None:
+                self._down._tail[:] = 0  # the dropped audio must not bleed into the next chunk
         except Exception:
             pass
 

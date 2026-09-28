@@ -5,6 +5,8 @@ __pycache__/
 **/data/*.db
 **/data/.spotify_cache
 **/data/memory/
+**/data/tts_cache/
+**/data/database/
 *.db
 *.sqlite3
 dist/

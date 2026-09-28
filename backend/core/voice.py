@@ -227,6 +227,58 @@ def _speak_offline(text: str):
     voice.Speak(text)
 
 
+# Fixed phrases ("Yes boss?") are synthesized once and replayed from disk.
+# Measured: edge-tts takes 1.4-2.8 s to return "Yes boss?", so every wake
+# used to answer that late — and on a flaky connection it waited out the
+# network timeout, then fell back to the robotic Windows voice. Cached,
+# the acknowledgement starts instantly and still works offline.
+_TTS_CACHE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "tts_cache")
+_CACHE_MAX_CHARS = 90   # short, repeatable lines only — never whole answers
+_mem_cache: dict = {}
+
+
+def _cache_path(text: str) -> str:
+    import hashlib
+    key = hashlib.sha1(f"{JARVIS_VOICE}|{JARVIS_RATE}|{JARVIS_VOLUME}|{text}".encode("utf-8")).hexdigest()[:20]
+    return os.path.join(_TTS_CACHE_DIR, f"{key}.mp3")
+
+
+def _cached_mp3(text: str):
+    if text in _mem_cache:
+        return _mem_cache[text]
+    try:
+        with open(_cache_path(text), "rb") as f:
+            _mem_cache[text] = f.read()
+            return _mem_cache[text]
+    except OSError:
+        return None
+
+
+def _store_mp3(text: str, mp3: bytes):
+    _mem_cache[text] = mp3
+    try:
+        os.makedirs(_TTS_CACHE_DIR, exist_ok=True)
+        with open(_cache_path(text), "wb") as f:
+            f.write(mp3)
+    except OSError:
+        pass
+
+
+def prewarm(*texts: str):
+    """Synthesize fixed phrases into the cache in the background, so even
+    the first wake after startup answers instantly."""
+    def run():
+        for t in texts:
+            if _cached_mp3(t) is None:
+                try:
+                    mp3 = asyncio.run(_edge_tts_mp3(t))
+                    if mp3:
+                        _store_mp3(t, mp3)
+                except Exception:
+                    pass  # offline now; it's cached the first time it's spoken online
+    threading.Thread(target=run, daemon=True).start()
+
+
 def speak(text: str):
     if not text:
         return
@@ -238,9 +290,14 @@ def speak(text: str):
     push_voice_event({"type": "speaking_start"})
     try:
         try:
-            mp3 = asyncio.run(_edge_tts_mp3(text))
-            if not mp3:
-                raise RuntimeError("edge-tts returned no audio")
+            cacheable = len(text) <= _CACHE_MAX_CHARS
+            mp3 = _cached_mp3(text) if cacheable else None
+            if mp3 is None:
+                mp3 = asyncio.run(_edge_tts_mp3(text))
+                if not mp3:
+                    raise RuntimeError("edge-tts returned no audio")
+                if cacheable and not _stop_speaking.is_set():
+                    _store_mp3(text, mp3)
             if not _TTS_DRYRUN:
                 _play_mp3(mp3)
         except Exception as e:

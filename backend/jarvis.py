@@ -22,6 +22,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
+import re
 import threading
 import time
 
@@ -46,11 +47,33 @@ DASHBOARD_AFTER_TURNS = 2
 
 _session = requests.Session()
 
-GOODBYE_PHRASES = [
-    "goodbye jarvis", "go offline", "that's all", "thats all", "stop jarvis", "bye jarvis",
-    "sleep jarvis", "go to standby", "standby mode", "back to standby", "go to sleep",
-]
-MIC_CHECK_PHRASES = ["can you hear me", "are you there", "mic check", "do you hear me"]
+GOODBYE_PHRASES = {
+    "goodbye", "goodbye jarvis", "go offline", "that's all", "thats all", "that is all", "stop jarvis",
+    "bye jarvis", "sleep jarvis", "go to standby", "standby mode", "back to standby", "go to sleep",
+}
+MIC_CHECK_PHRASES = {"can you hear me", "are you there", "mic check", "do you hear me"}
+# Politeness around a command that doesn't change what it is:
+# "okay, that's all for now, thanks" is still just "that's all".
+_LEAD_FILLER = ("ok ", "okay ", "alright ", "all right ", "thanks ", "thank you ", "hey ", "jarvis ")
+_TAIL_FILLER = (" for now", " jarvis", " boss", " thanks", " thank you", " please")
+
+
+def _bare_command(text: str) -> str:
+    """The utterance with punctuation and polite filler stripped, so a
+    control phrase is recognized only when it's the whole utterance —
+    "that's all my pending assignments" (a mis-heard "what's all...") used
+    to end the conversation because "that's all" appeared inside it."""
+    t = " ".join(re.sub(r"[^\w\s']", " ", text.lower()).split())
+    changed = True
+    while changed:
+        changed = False
+        for head in _LEAD_FILLER:
+            if t.startswith(head):
+                t, changed = t[len(head):], True
+        for tail in _TAIL_FILLER:
+            if t.endswith(tail):
+                t, changed = t[:-len(tail)], True
+    return t.strip()
 
 
 def call_server(text: str) -> dict:
@@ -136,11 +159,11 @@ def conversation(mic):
         print(f"🗣️  You: {text}")
         push_voice_event({"type": "transcript", "text": text})
 
-        lowered = text.lower()
-        if any(p in lowered for p in GOODBYE_PHRASES):
+        bare = _bare_command(text)
+        if bare in GOODBYE_PHRASES:
             speak("Standing by, boss.")
             return
-        if any(p in lowered for p in MIC_CHECK_PHRASES):
+        if bare in MIC_CHECK_PHRASES:
             speak("Loud and clear, boss.")
             mic.drain()
             continue
@@ -183,6 +206,9 @@ def main():
 
     from core.mic import open_mic
     from core.wakeword import WakeDetector, THRESHOLD
+    # Cache the fixed lines now, so even the first wake answers instantly.
+    voice.prewarm("Yes boss?", "Standing by, boss.", "Loud and clear, boss.",
+                  "I'm offline right now, boss — I can't understand speech without the internet.")
     mic = open_mic(should_stop=is_shutdown_requested)
     detector = WakeDetector()
     threading.Thread(target=_heartbeat_worker, daemon=True).start()
