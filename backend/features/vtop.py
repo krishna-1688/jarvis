@@ -1625,7 +1625,7 @@ def _grade_history(user_input: str, course: str | None) -> FeatureResult:
     marks"), a grade ("which subjects did I get B in"), a course, or any
     mix of them. Without this, every one of those listed all courses."""
     from core.memory import get_all_grades, get_grades_for_semester, get_grade_for_course, sem_label
-    from core.router import detect_semester, detect_grade_filter
+    from core.router import detect_semester, detect_grade_filter, grade_matches
     from core.course_resolver import resolve_course_best
 
     letters, rest = detect_grade_filter(user_input)
@@ -1645,10 +1645,11 @@ def _grade_history(user_input: str, course: str | None) -> FeatureResult:
             base = [r for r in base if r in get_grade_for_course(course)]
     else:
         base = get_grade_for_course(course) if course else get_all_grades()
-    rows = [r for r in base if (r.get("grade") or "").upper() in letters] if letters else base
+    rows = [r for r in base if grade_matches(r.get("grade"), letters)] if letters else base
 
     where = f" in {sem_label(semester)}" if semester else ""
-    wanted = " or ".join(sorted(letters))
+    arrears = letters == {"F", "N"}          # "arrear", "backlog", "fail": F or any N grade
+    wanted = "an N grade" if letters == {"N"} else " or ".join(sorted(letters))
 
     if course and letters and base:
         # "did I get an A in Calculus" is a yes/no about that one course
@@ -1658,7 +1659,7 @@ def _grade_history(user_input: str, course: str | None) -> FeatureResult:
             (r.get("course_code") or "").upper().endswith("P")
         r = next((x for x in base if is_lab(x) == wants_lab), base[0])
         got = (r.get("grade") or "").upper()
-        spoken = f"{'Yes' if got in letters else 'No'}, you got {got} in {r['course_name']}{where}."
+        spoken = f"{'Yes' if grade_matches(got, letters) else 'No'}, you got {got} in {r['course_name']}{where}."
         display = spoken + "".join(f"\n  {x['course_name']}: {x['grade']}" for x in base if x is not r)
         return FeatureResult(ok=True, data={"rows": base}, display=display, spoken=spoken)
 
@@ -1669,8 +1670,8 @@ def _grade_history(user_input: str, course: str | None) -> FeatureResult:
         elif semester == CURRENT_SEM:
             msg = (f"{sem_label(semester)} is still going, so there are no grades yet. "
                    "Ask 'what are my marks' for your CAT and FAT scores.")
-        elif letters == {"F"}:
-            msg = f"You haven't failed any course{where}."
+        elif arrears:
+            msg = f"You don't have any arrears{where} — no F or N grades."
         elif letters:
             msg = f"You didn't get {wanted} in any course{where}."
         elif semester:
@@ -1679,22 +1680,39 @@ def _grade_history(user_input: str, course: str | None) -> FeatureResult:
             msg = "No grade history found."
         return FeatureResult(ok=True, data={"rows": []}, display=msg, spoken=msg)
 
-    title = "Grades" + (f" ({wanted})" if letters else "") + (f" for {sem_label(semester)}" if semester else "")
+    # An arrear that shows up again later with a pass grade has been cleared.
+    cleared = {}
+    if letters & {"F", "N"}:
+        history = get_all_grades()
+        for r in rows:
+            later = [x for x in history if x["id"] != r["id"] and x.get("course_code") == r.get("course_code")
+                     and not grade_matches(x.get("grade"), {"F", "N"})]
+            if later:
+                cleared[r["id"]] = later[-1]["grade"]
+
+    shown = "N1-N4" if letters == {"N"} else wanted
+    title = ("Arrears (F / N grades)" if arrears else "Grades" + (f" ({shown})" if letters else "")) + \
+        (f" for {sem_label(semester)}" if semester else "")
     lines = [title + ":"]
     for r in rows:
         sem = "" if semester else \
             f" ({sem_label(r['semester_id']) if r.get('semester_id') else 'unknown semester'})"
-        lines.append(f"  {r['course_name']}{sem}: {r['grade']}")
+        note = f" — cleared later with {cleared[r['id']]}" if r["id"] in cleared else ""
+        lines.append(f"  {r['course_name']}{sem}: {r['grade']}{note}")
     display = "\n".join(lines)
 
     names = [r["course_name"] for r in rows]
     if course and len(rows) <= 2 and not letters:
         r = rows[0]
         spoken = f"Your grade in {r['course_name']}{where} was {r['grade']}."
+    elif arrears:
+        n = len(rows)
+        named = [f"{r['course_name']} ({r['grade']}{', cleared' if r['id'] in cleared else ''})" for r in rows]
+        spoken = (f"You have {n} arrear{'s' if n != 1 else ''}{where}"
+                  + (f", {len(cleared)} already cleared" if cleared else "") + f": {_join_names(named)}.")
     elif letters:
         n = len(rows)
-        spoken = (f"You got {wanted} in {n} course{'s' if n != 1 else ''}{where}: {_join_names(names)}."
-                  if wanted != "F" else f"You failed {n} course{'s' if n != 1 else ''}{where}: {_join_names(names)}.")
+        spoken = f"You got {wanted} in {n} course{'s' if n != 1 else ''}{where}: {_join_names(names)}."
     else:
         counts = {}
         for r in rows:

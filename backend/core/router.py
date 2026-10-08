@@ -987,33 +987,57 @@ def detect_semester(text: str) -> str | None:
         return "all"
     return None
 
-# "which subjects did I get B in", "S grade", "how many A's", "did I fail
-# anything". A lowercase "a" is the article ("did I get a grade in DAA"),
-# so it only counts after the word: "grade a".
-_G = r"[SABCDEFP](?:\s*(?:,|/|\bor\b|\band\b)\s*[SABCDEFP])*"   # "B", "A or B", "S, A and B"
+# "which subjects did I get B in", "S grade", "how many A's", "any N1",
+# "which subjects are arrears". A lowercase "a" is the article ("did I get
+# a grade in DAA"), so it only counts after the word: "grade a".
+# VIT marks a backlog with F or an N grade (N1-N4); "arrear", "backlog" and
+# "fail" mean any of them, returned as the pseudo-letter "N" plus "F".
+_L = r"(?:N[1-4]?|[SABCDEFP])"
+_G = rf"{_L}(?:\s*(?:,|/|\bor\b|\band\b)\s*{_L})*"   # "B", "A or B", "S, A and B", "F or N1"
+_GRADE_WORD = r"g(?:ra|ar)des?"                       # "grade", "grades", and the typo "garde"
 _GRADE_LETTER_RES = [
     re.compile(rf"\b(?:got|get|getting|scored?|received|secured)\s+(?:an?\s+)?({_G})\b(?!['’]?\w)", re.I),
-    re.compile(rf"\b({_G})\s*(?:-\s*)?grades?\b", re.I),
-    re.compile(rf"\bgrades?\s+(?:of\s+|as\s+|is\s+|was\s+)?({_G})\b(?!['’]?\w)", re.I),
+    re.compile(rf"\b({_G})\s*(?:-\s*)?{_GRADE_WORD}\b", re.I),
+    re.compile(rf"\b{_GRADE_WORD}\s+(?:of\s+|as\s+|is\s+|was\s+)?({_G})\b(?!['’]?\w)", re.I),
     re.compile(r"\b([SABCDEF])['’]?s\b(?=\s+(?:in|did|have|i|do)\b|\s*\??$)"),
+    re.compile(r"\b(N[1-4])\b", re.I),             # "N1" on its own is unambiguous
 ]
-_FAIL_RE = re.compile(r"\b(?:fail|failed|failing|arrears?|backlogs?)\b", re.I)
+_FAIL_RE = re.compile(r"\b(?:fail|failed|failing|arrears?|backlogs?|re-?appear\w*|supplementary)\b", re.I)
 
 
 def detect_grade_filter(user_input: str) -> tuple[set, str]:
-    """(grade letters asked about, the sentence with those phrases removed)."""
+    """(grades asked about, the sentence with those phrases removed).
+    "N" in the set means any N grade; arrear questions give {"F", "N"}."""
     text = user_input or ""
     letters = set()
     for rx in _GRADE_LETTER_RES:
         for m in rx.finditer(text):
             if m.group(1) == "a" and rx is not _GRADE_LETTER_RES[2]:
                 continue
-            letters |= {g.upper() for g in re.findall(r"\b[SABCDEFP]\b", m.group(1), re.I)}
+            letters |= {g.upper() for g in re.findall(r"\b(?:N[1-4]?|[SABCDEFP])\b", m.group(1), re.I)}
         text = rx.sub(" ", text)
     if _FAIL_RE.search(text):
-        letters.add("F")
+        letters |= {"F", "N"}
         text = _FAIL_RE.sub(" ", text)
     return letters, text
+
+
+_ARREAR_REFLEX_RE = re.compile(
+    r"\b(?:arrears?|backlogs?|re-?appear\w*|supplementary)\b|\bN[1-4]\b|\bN\s*-?\s*g(?:ra|ar)des?\b", re.I)
+
+
+def _grade_reflex(text: str):
+    """Arrear / backlog / N-grade questions: the classifier sent "do I have
+    any arrears" to plain chat. ("fail" is left out on purpose — "I'm scared
+    I'll fail" is a conversation, not a grade lookup.)"""
+    if _ARREAR_REFLEX_RE.search(text or "") and not re.search(r"\b(?:cat|fat|quiz|da)\s*-?\d*\b", text, re.I):
+        return "grade_history", {}
+    return None
+
+
+def grade_matches(grade: str, letters: set) -> bool:
+    g = (grade or "").strip().upper()
+    return g in letters or ("N" in letters and g.startswith("N"))
 
 
 ASSESSMENT_PATTERNS = [
@@ -1543,7 +1567,7 @@ def route(text: str) -> tuple:
     Returns (category, payload). `category` is looked up in server.py's
     INTENT_HANDLERS registry; "brain" means plain conversation.
     """
-    fast_result = reflex_route(text) or _course_followup(text)
+    fast_result = _grade_reflex(text) or reflex_route(text) or _course_followup(text)
     if fast_result:
         category, payload = fast_result
     else:
