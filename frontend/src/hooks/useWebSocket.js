@@ -1,5 +1,5 @@
 import { useEffect, useRef, useSyncExternalStore } from 'react';
-import { WS_URL } from '../api.js';
+import { wsUrl } from '../api.js';
 
 /**
  * A single shared WebSocket connection to /stream, reused by every
@@ -28,7 +28,7 @@ function setStatus(next) {
 function connect() {
   retryTimer = null;
 
-  ws = new WebSocket(WS_URL);
+  ws = new WebSocket(wsUrl());
   ws.onopen = () => {
     backoff = MIN_BACKOFF_MS;
     setStatus('connected');

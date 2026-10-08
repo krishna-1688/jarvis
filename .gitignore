@@ -26,3 +26,6 @@ whatsapp_service/node_modules/
 
 # Personal profile (template: backend/profile.example.toml)
 **/profile.toml
+
+# Per-install API token for the dashboard (backend/core/security.py)
+**/data/.api_token

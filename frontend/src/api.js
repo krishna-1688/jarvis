@@ -2,8 +2,20 @@
 
 const BASE_URL = 'http://127.0.0.1:8000';
 
+// The backend rejects browser requests without this install's token (see
+// backend/core/security.py); Electron's preload supplies it.
+let cachedToken = '';
+function token() {
+  if (!cachedToken) cachedToken = window.jarvis?.apiToken?.() || '';
+  return cachedToken;
+}
+
+function authHeaders(extra = {}) {
+  return { ...extra, 'X-Jarvis-Token': token() };
+}
+
 async function getJSON(path) {
-  const res = await fetch(`${BASE_URL}${path}`);
+  const res = await fetch(`${BASE_URL}${path}`, { headers: authHeaders() });
   if (!res.ok) throw new Error(`GET ${path} -> ${res.status}`);
   return res.json();
 }
@@ -26,7 +38,7 @@ export const api = {
   saveProfile: async (profile) => {
     const res = await fetch(`${BASE_URL}/profile`, {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ profile }),
     });
     if (!res.ok) throw new Error(`PUT /profile -> ${res.status}`);
@@ -35,7 +47,7 @@ export const api = {
   command: async (text) => {
     const res = await fetch(`${BASE_URL}/command`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ text }),
     });
     if (!res.ok) throw new Error(`POST /command -> ${res.status}`);
@@ -43,4 +55,5 @@ export const api = {
   },
 };
 
-export const WS_URL = 'ws://127.0.0.1:8000/stream';
+// Browsers can't set headers on a WebSocket, so the token goes in the URL.
+export const wsUrl = () => `ws://127.0.0.1:8000/stream?token=${encodeURIComponent(token())}`;

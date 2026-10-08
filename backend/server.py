@@ -1381,17 +1381,19 @@ def _start_background_workers():
 
 app = FastAPI(title="Jarvis Backend")
 
-# The Electron console/widget load from http://localhost:5173 in dev (and
-# file:// once packaged) while this API serves 127.0.0.1:8000 — a
-# different origin either way, so the browser blocks fetch()/WebSocket
-# without explicit CORS. This is a local single-user assistant with no
-# public exposure, so allow_origins=["*"] is the right tradeoff here.
+# The dashboard loads from file:// (or the Vite dev server) while this API
+# is on 127.0.0.1:8000, so it needs CORS — for those origins only.
+# Access control itself is core/security.py's guard: a browser request
+# needs this install's token whatever its origin.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=["null", "file://", "http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_methods=["GET", "POST", "PUT"],
+    allow_headers=["Content-Type", "X-Jarvis-Token"],
 )
+from core.security import LocalOnlyGuard, api_token  # noqa: E402
+app.add_middleware(LocalOnlyGuard)
+api_token()   # create the token now, so the dashboard can read it on its first open
 
 
 class CommandRequest(BaseModel):

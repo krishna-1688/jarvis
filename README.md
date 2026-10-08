@@ -86,6 +86,7 @@ Need to change something later? Run `python setup.py college`, `profile`, `keys`
 - Your profile, memories, tasks, expenses and synced college data live in `backend/profile.toml` and a local SQLite database. All of these are git-ignored.
 - **What does leave your laptop:** the text of what you say is sent to Groq's AI (and Google Gemini, if you add a backup key) to understand and answer it. The VTOP captcha image is read by the same AI. Spoken replies are made with Microsoft Edge's online text-to-speech voice. There are no analytics, accounts or servers of mine.
 - Jarvis syncs VTOP a few times a day, no more than a student opening it themselves.
+- **Only you can reach it.** Jarvis listens on `127.0.0.1` only, never your Wi-Fi network. Web pages open in your browser can't read your data or send it commands: browser requests need a random per-install key that only the dashboard has. See [SECURITY.md](SECURITY.md).
 
 ## How it works
 

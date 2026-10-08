@@ -156,19 +156,17 @@ def open_app(app_name):
         except Exception:
             return False, f"Could not open {app_name}"
 
-    resolved_path = shutil.which(app)
+    # Only a bare program name found on PATH — never a path or a command
+    # line taken from what was said.
+    resolved_path = shutil.which(app) if re.fullmatch(r"[\w.+-]{1,40}", app) else None
     if resolved_path:
         try:
-            subprocess.Popen(resolved_path)
+            subprocess.Popen([resolved_path])
             return True, f"Opening {app_name}"
         except Exception:
             return False, f"Could not open {app_name}"
 
-    try:
-        subprocess.Popen(app)
-        return True, f"Trying to open {app_name}"
-    except Exception:
-        return False, f"App not found: {app_name}"
+    return False, f"I couldn't find an app called {app_name}."
 
 def kill_process_fuzzy(name_query: str, threshold: int = 85):
     all_names = sorted(set(

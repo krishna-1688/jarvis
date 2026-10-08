@@ -9,7 +9,21 @@ const qrcode = require("qrcode-terminal");
 const { Client, LocalAuth } = require("whatsapp-web.js");
 
 const PORT = 4500;
+const HOST = "127.0.0.1";
 const app = express();
+
+// This service can read contacts and send messages as the user, and only
+// the Jarvis backend on this laptop should ever call it. So it listens on
+// 127.0.0.1 only (not the Wi-Fi network), and turns away requests made
+// from a browser (they carry Origin / Sec-Fetch-Site, which web pages
+// can't remove) or addressed to another host name (DNS rebinding).
+app.use((req, res, next) => {
+  const host = (req.headers.host || "").replace(/:\d+$/, "").toLowerCase();
+  if (!["127.0.0.1", "localhost"].includes(host) || req.headers.origin || req.headers["sec-fetch-site"]) {
+    return res.status(403).json({ error: "forbidden" });
+  }
+  next();
+});
 app.use(express.json());
 
 // ── UPI/bank auto-parse (Phase 5.2) ───────
@@ -345,7 +359,7 @@ app.post("/send", async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`\n🚀 Jarvis WhatsApp service running on http://localhost:${PORT}`);
+app.listen(PORT, HOST, () => {
+  console.log(`\n🚀 Jarvis WhatsApp service running on http://${HOST}:${PORT}`);
   console.log("   Waiting for WhatsApp client to initialize...\n");
 });
