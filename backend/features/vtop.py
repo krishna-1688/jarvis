@@ -1613,6 +1613,99 @@ def get_exams_result(user_input: str, entities: dict = None, on_progress=None) -
     return FeatureResult(ok=True, data={"exams": rows}, display=display, spoken=spoken)
 
 
+def _join_names(names: list, limit: int = 5) -> str:
+    shown = names[:limit]
+    if len(names) > limit:
+        return ", ".join(shown) + f" and {len(names) - limit} more"
+    return shown[0] if len(shown) == 1 else ", ".join(shown[:-1]) + " and " + shown[-1]
+
+
+def _grade_history(user_input: str, course: str | None) -> FeatureResult:
+    """Grades, narrowed by whatever the sentence names: a semester ("sem 3
+    marks"), a grade ("which subjects did I get B in"), a course, or any
+    mix of them. Without this, every one of those listed all courses."""
+    from core.memory import get_all_grades, get_grades_for_semester, get_grade_for_course, sem_label
+    from core.router import detect_semester, detect_grade_filter
+    from core.course_resolver import resolve_course_best
+
+    letters, rest = detect_grade_filter(user_input)
+    # The course backstop resolves the whole sentence, so "subjects I got
+    # C in" arrives as course=Calculus. Keep a course only if it's still
+    # named once the grade phrase is gone.
+    if course and letters:
+        best = resolve_course_best(rest)
+        course = best["course_name"] if best else None
+
+    semester = detect_semester(user_input)
+    semester = None if semester == "all" else semester
+
+    if semester:
+        base = get_grades_for_semester(semester)
+        if course:
+            base = [r for r in base if r in get_grade_for_course(course)]
+    else:
+        base = get_grade_for_course(course) if course else get_all_grades()
+    rows = [r for r in base if (r.get("grade") or "").upper() in letters] if letters else base
+
+    where = f" in {sem_label(semester)}" if semester else ""
+    wanted = " or ".join(sorted(letters))
+
+    if course and letters and base:
+        # "did I get an A in Calculus" is a yes/no about that one course
+        # (the theory one unless a lab is named), not "which courses got A".
+        wants_lab = bool(re.search(r"\b(?:lab|practical)\b", user_input or "", re.I))
+        is_lab = lambda r: bool(re.search(r"\blab\b", r["course_name"], re.I)) or \
+            (r.get("course_code") or "").upper().endswith("P")
+        r = next((x for x in base if is_lab(x) == wants_lab), base[0])
+        got = (r.get("grade") or "").upper()
+        spoken = f"{'Yes' if got in letters else 'No'}, you got {got} in {r['course_name']}{where}."
+        display = spoken + "".join(f"\n  {x['course_name']}: {x['grade']}" for x in base if x is not r)
+        return FeatureResult(ok=True, data={"rows": base}, display=display, spoken=spoken)
+
+    if not rows:
+        if course and not base:
+            msg = (f"There's no grade for {course} yet — it's probably a course you're still taking. "
+                   f"Ask 'what are my {course} marks' for your CAT and FAT scores.")
+        elif semester == CURRENT_SEM:
+            msg = (f"{sem_label(semester)} is still going, so there are no grades yet. "
+                   "Ask 'what are my marks' for your CAT and FAT scores.")
+        elif letters == {"F"}:
+            msg = f"You haven't failed any course{where}."
+        elif letters:
+            msg = f"You didn't get {wanted} in any course{where}."
+        elif semester:
+            msg = f"I don't have grades for {sem_label(semester)}. Say 'sync from VTOP' to fetch them."
+        else:
+            msg = "No grade history found."
+        return FeatureResult(ok=True, data={"rows": []}, display=msg, spoken=msg)
+
+    title = "Grades" + (f" ({wanted})" if letters else "") + (f" for {sem_label(semester)}" if semester else "")
+    lines = [title + ":"]
+    for r in rows:
+        sem = "" if semester else \
+            f" ({sem_label(r['semester_id']) if r.get('semester_id') else 'unknown semester'})"
+        lines.append(f"  {r['course_name']}{sem}: {r['grade']}")
+    display = "\n".join(lines)
+
+    names = [r["course_name"] for r in rows]
+    if course and len(rows) <= 2 and not letters:
+        r = rows[0]
+        spoken = f"Your grade in {r['course_name']}{where} was {r['grade']}."
+    elif letters:
+        n = len(rows)
+        spoken = (f"You got {wanted} in {n} course{'s' if n != 1 else ''}{where}: {_join_names(names)}."
+                  if wanted != "F" else f"You failed {n} course{'s' if n != 1 else ''}{where}: {_join_names(names)}.")
+    else:
+        counts = {}
+        for r in rows:
+            counts[r.get("grade") or "?"] = counts.get(r.get("grade") or "?", 0) + 1
+        order = "SABCDEFPN?"
+        tally = ", ".join(f"{c} {g}" for g, c in sorted(counts.items(), key=lambda kv: order.find(kv[0][0])))
+        spoken = (f"{sem_label(semester) if semester else 'Overall'}: {len(rows)} courses — {tally}. "
+                  "The full list is on screen.")
+    return FeatureResult(ok=True, data={"rows": rows}, display=display, spoken=spoken)
+
+
 def get_grades_result(mode: str, user_input: str, entities: dict = None, on_progress=None) -> FeatureResult:
     """
     mode: 'cgpa' | 'sem_gpa' | 'grade_history'. entities may contain
@@ -1700,21 +1793,7 @@ def get_grades_result(mode: str, user_input: str, entities: dict = None, on_prog
         return FeatureResult(ok=True, data={"rows": rows}, display=display, spoken=spoken)
 
     if mode == "grade_history":
-        rows = get_grade_for_course(course) if course else get_all_grades()
-        if not rows:
-            msg = "No grade history found."
-            return FeatureResult(ok=False, data={}, display=msg, spoken=msg, error="no_data")
-        lines = ["Grade history:"]
-        for r in rows:
-            sem = sem_label(r["semester_id"]) if r.get("semester_id") else "unknown semester"
-            lines.append(f"  {r['course_name']} ({sem}): {r['grade']}")
-        display = "\n".join(lines)
-        if course:
-            r = rows[0]
-            spoken = f"Your grade in {r['course_name']} was {r['grade']}."
-        else:
-            spoken = f"You have grades for {len(rows)} course(s). The full list is on screen."
-        return FeatureResult(ok=True, data={"rows": rows}, display=display, spoken=spoken)
+        return _grade_history(user_input, course)
 
     msg = "I'm not sure what grade info you want."
     return FeatureResult(ok=False, data={}, display=msg, spoken=msg, error="unknown_mode")

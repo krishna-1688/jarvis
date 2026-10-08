@@ -987,6 +987,35 @@ def detect_semester(text: str) -> str | None:
         return "all"
     return None
 
+# "which subjects did I get B in", "S grade", "how many A's", "did I fail
+# anything". A lowercase "a" is the article ("did I get a grade in DAA"),
+# so it only counts after the word: "grade a".
+_G = r"[SABCDEFP](?:\s*(?:,|/|\bor\b|\band\b)\s*[SABCDEFP])*"   # "B", "A or B", "S, A and B"
+_GRADE_LETTER_RES = [
+    re.compile(rf"\b(?:got|get|getting|scored?|received|secured)\s+(?:an?\s+)?({_G})\b(?!['’]?\w)", re.I),
+    re.compile(rf"\b({_G})\s*(?:-\s*)?grades?\b", re.I),
+    re.compile(rf"\bgrades?\s+(?:of\s+|as\s+|is\s+|was\s+)?({_G})\b(?!['’]?\w)", re.I),
+    re.compile(r"\b([SABCDEF])['’]?s\b(?=\s+(?:in|did|have|i|do)\b|\s*\??$)"),
+]
+_FAIL_RE = re.compile(r"\b(?:fail|failed|failing|arrears?|backlogs?)\b", re.I)
+
+
+def detect_grade_filter(user_input: str) -> tuple[set, str]:
+    """(grade letters asked about, the sentence with those phrases removed)."""
+    text = user_input or ""
+    letters = set()
+    for rx in _GRADE_LETTER_RES:
+        for m in rx.finditer(text):
+            if m.group(1) == "a" and rx is not _GRADE_LETTER_RES[2]:
+                continue
+            letters |= {g.upper() for g in re.findall(r"\b[SABCDEFP]\b", m.group(1), re.I)}
+        text = rx.sub(" ", text)
+    if _FAIL_RE.search(text):
+        letters.add("F")
+        text = _FAIL_RE.sub(" ", text)
+    return letters, text
+
+
 ASSESSMENT_PATTERNS = [
     (["cat1", "cat 1", "cat-1", "cat i", "continuous assessment test 1",
       "continuous assessment test i", "cat one", "first cat"],
@@ -1534,6 +1563,11 @@ def route(text: str) -> tuple:
     # nothing PC-related is in the text, falls back to chat).
     if category == "system_shutdown" and "jarvis" not in text.lower():
         category, payload = "pc", {}
+
+    # A letter grade lives in the grade history, never in CAT/FAT marks:
+    # "did I get an A in calculus" was classified as assessment marks.
+    if category == "vtop_marks" and detect_grade_filter(text)[0]:
+        category = "grade_history"
 
     # A college feature that isn't connected: say how to connect it, rather
     # than let the feature fail on a missing login.
