@@ -103,7 +103,7 @@ EXPENSE_AUTO_INGEST = os.getenv("EXPENSE_AUTO_INGEST", "true").lower() == "true"
 # Each switches on only when its credentials are present, so Jarvis runs
 # for anyone with just a Groq key. VIT students add their VTOP / LMS
 # logins to get attendance, marks, exams, timetable and deadlines.
-VTOP_USERNAME = os.getenv("VTOP_USERNAME", "").strip()   # your VIT registration number
+VTOP_USERNAME = os.getenv("VTOP_USERNAME", "").strip()   # what you type on the VTOP login page (reg no or custom username)
 VTOP_PASSWORD = os.getenv("VTOP_PASSWORD", "")
 LMS_USERNAME  = os.getenv("LMS_USERNAME", "").strip()
 LMS_PASSWORD  = os.getenv("LMS_PASSWORD", "")

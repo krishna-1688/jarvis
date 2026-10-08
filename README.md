@@ -63,7 +63,7 @@ Changes apply from the next reply, with no restart.
    ```
 2. **Set up:** double-click **`setup.bat`**. It installs everything, then asks for:
    - your Groq key (it checks the key right away)
-   - optionally, your VTOP registration number and password, and your LMS login
+   - optionally, your VTOP username and password (your reg number or the custom username you log in with), and your LMS login
    - your name, tone, voice, goals and routine
    - a quick “Hey Jarvis” microphone test
 3. **Run:** double-click **`start.bat`**. When the console shows *“Standby — say 'Hey Jarvis'”*, say it.

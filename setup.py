@@ -230,21 +230,34 @@ def section_college(env):
     note("Your password is stored only in backend/.env on this laptop and sent only to VIT.")
     updates = {}
     if yes("Are you a VIT student and want to connect VTOP?", True):
-        while True:
-            reg = ask("Registration number (e.g. 24BCE1234)", env.get("VTOP_USERNAME", "")).upper()
-            if re.fullmatch(r"\d{2}[A-Z]{3}\d{4}", reg):
-                break
-            warn("That doesn't look like a VIT registration number.")
-        pw = ask("VTOP password", env.get("VTOP_PASSWORD", ""), secret=True)
-        updates.update(VTOP_USERNAME=reg, VTOP_PASSWORD=pw)
         from core import profile
+        college = profile.get()["college"]
+        user = ""
+        while not user:
+            user = ask("VTOP username (exactly what you type on the VTOP login page)", env.get("VTOP_USERNAME", ""))
+        pw = ask("VTOP password", env.get("VTOP_PASSWORD", ""), secret=True)
+        updates.update(VTOP_USERNAME=user, VTOP_PASSWORD=pw)
+
+        # Semester IDs are worked out from the year you joined. A username
+        # like 24BCE1234 already says it; a custom username doesn't.
+        m = re.fullmatch(r"(\d{2})[A-Za-z]{3}\d{4}", user)
+        joined = 2000 + int(m.group(1)) if m else 0
+        while not joined:
+            answer = ask("Year you joined VIT, or your registration number (e.g. 2024 or 24BCE1234)",
+                         str(college.get("admission_year") or ""))
+            m = re.fullmatch(r"(20\d{2})|(\d{2})[A-Za-z]{3}\d{4}", answer)
+            if m:
+                joined = int(m.group(1)) if m.group(1) else 2000 + int(m.group(2))
+            else:
+                warn("Type the year, like 2024, or a registration number like 24BCE1234.")
         campus = choose("Campus", [("chennai", "VIT Chennai (tested)"), ("vellore", "VIT Vellore (experimental)")],
-                        profile.get()["college"].get("campus", "chennai"))
-        profile.save({"college": {"campus": campus}})
-        good(f"VTOP connected for {reg} — first sync runs when Jarvis starts (captcha is solved automatically).")
+                        college.get("campus", "chennai"))
+        profile.save({"college": {"campus": campus, "admission_year": joined}})
+        good(f"VTOP connected for {user} (joined {joined}) — first sync runs when Jarvis starts "
+             "(captcha is solved automatically).")
 
         if yes("Connect LMS (Moodle) for assignments too?", True):
-            updates["LMS_USERNAME"] = ask("LMS username", env.get("LMS_USERNAME") or reg)
+            updates["LMS_USERNAME"] = ask("LMS username", env.get("LMS_USERNAME") or user)
             updates["LMS_PASSWORD"] = ask("LMS password", env.get("LMS_PASSWORD", ""), secret=True)
         else:
             updates.update(LMS_USERNAME="", LMS_PASSWORD="")
