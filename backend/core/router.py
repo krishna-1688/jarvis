@@ -969,7 +969,7 @@ def _semester_map() -> list:
     out = []
     for n, sid in sorted(by_number.items()):
         out.append(([f"sem {n}", f"semester {n}", f"sem{n}", f"semester{n}", f"{_ORD_SHORT[n - 1]} sem",
-                     f"{_ORDINALS[n - 1]} sem", f"{_ORDINALS[n - 1]} semester"], sid))
+                     f"{_ORD_SHORT[n - 1]} semester", f"{_ORDINALS[n - 1]} sem", f"{_ORDINALS[n - 1]} semester"], sid))
     out.append((["current sem", "this sem", "current semester", "this semester"], CURRENT_SEM))
     prev = by_number.get(current_number() - 1)
     if prev:
@@ -1024,15 +1024,154 @@ def detect_grade_filter(user_input: str) -> tuple[set, str]:
 
 _ARREAR_REFLEX_RE = re.compile(
     r"\b(?:arrears?|backlogs?|re-?appear\w*|supplementary)\b|\bN[1-4]\b|\bN\s*-?\s*g(?:ra|ar)des?\b", re.I)
+# "S grades", "B grade", "grade A" — a letter right next to the word. A
+# lowercase "a grade" is the article, so only a capital A counts there.
+_LETTER_GRADE_RE = re.compile(r"\b(?:[SsBbCcDdEeFfPp]|A)\s*-?\s*g(?:ra|ar)des?\b|\bg(?:ra|ar)des?\s+(?:of\s+)?[SABCDEFP]\b")
+_ASSESSMENT_RE = re.compile(r"\b(?:cat|fat|quiz|da|assignment|assessment|internals?|lab\s+marks?)\s*-?\s*\d*\b", re.I)
+_EXAM_PLACE_RE = re.compile(r"\b(?:exam|exams|cat\s*-?\s*[12]?|fat)\b.*\b(?:venue|seat|hall|room|block|where)\b"
+                            r"|\b(?:venue|seat|hall|room|block|hall\s+ticket|seat\s+(?:no|number))\b.*\b(?:exam|exams|cat\s*-?\s*[12]?|fat)\b",
+                            re.I)
+_SEM_GPA_RE = re.compile(r"(?<!c)\bgpa\b", re.I)
+
+
+# Knowledge, advice and feelings — "what does N1 grade mean", "how is CGPA
+# calculated", "how do I get an S grade", "is 80 percent attendance good",
+# "I feel like I'll fail DAA". These mention academic words but want an
+# explanation, not the student's records.
+_KNOWLEDGE_RE = re.compile(
+    r"\b(?:what\s+does|what\s+happens|how\s+to|how\s+do\s+i|how\s+can\s+i|how\s+should|how\s+is\s+(?!my\b)"
+    r"|how\s+are\s+(?!my\b)|means?|meaning|calculated|passing\s+marks?|pass\s+mark|minimum\s+marks?|tips|"
+    r"prepare|preparation|revise|revision|advice|suggest|explain|difference\s+between|study\s+plan|motivat\w*|"
+    r"is\s+it\s+good|feel|feeling|stressed|stress|worried|anxious|scared|nervous|afraid)\b"
+    r"|\bwhat\s+is\s+an?\b|\bwhat's\s+an?\b"
+    r"|\bis\s+(?:an?\s+)?\d+(?:\.\d+)?\s*(?:cgpa|gpa|%|percent|marks?|pointer)?\s*(?:attendance\s+)?"
+    r"(?:good|enough|bad|ok|okay|decent|low)\b", re.I)
+# Commands that merely mention an academic word: "remind me to submit the DA
+# assignment", "spent 200 on exam fees", "remember that my FAT hall is AB1".
+_COMMAND_RE = re.compile(
+    r"^(?:(?:hey\s+)?jarvis[\s,]+|please\s+|can\s+you\s+|could\s+you\s+)?(?:remind|add|set|block|schedule|start|stop|"
+    r"open|play|close|spent|spend|paid|pay|send|text|message|search|google|mark|remember|note|log|delete|remove|"
+    r"cancel|put|create|make|tick|finish)\b", re.I)
+
+
+def _not_a_lookup(text: str) -> bool:
+    return bool(_KNOWLEDGE_RE.search(text or "") or _COMMAND_RE.search((text or "").strip()))
 
 
 def _grade_reflex(text: str):
-    """Arrear / backlog / N-grade questions: the classifier sent "do I have
-    any arrears" to plain chat. ("fail" is left out on purpose — "I'm scared
-    I'll fail" is a conversation, not a grade lookup.)"""
-    if _ARREAR_REFLEX_RE.search(text or "") and not re.search(r"\b(?:cat|fat|quiz|da)\s*-?\d*\b", text, re.I):
+    """Academic questions whose wording leaves nothing to interpret, so they
+    skip the classifier: arrears / backlogs / N grades and explicit letter
+    grades (the classifier sent "do I have any arrears" to chat), exam venue
+    or seat (also sent to chat), and "sem 3 GPA". ("fail" is left out on
+    purpose — "I'm scared I'll fail" is a conversation, not a grade lookup.)
+    Knowledge questions and commands go on to the classifier."""
+    text = text or ""
+    if _not_a_lookup(text):
+        return None
+    if not _ASSESSMENT_RE.search(text) and (_ARREAR_REFLEX_RE.search(text) or _LETTER_GRADE_RE.search(text)):
         return "grade_history", {}
+    if _EXAM_PLACE_RE.search(text):
+        return "exams", {}
+    if _SEM_GPA_RE.search(text) and detect_semester(text) not in (None, "all") and "cgpa" not in text.lower():
+        return "sem_gpa", {}
     return None
+
+
+# Used when every classifier model is busy (rate limited) or unreachable,
+# which on the free tier happens whenever questions come quickly. Ordered
+# most specific first; each is (pattern, intent).
+_ACADEMIC_FALLBACKS = [
+    (r"\b(?:cgpa|gpa)\b.*\bif\s+i\s+(?:get|got|score)\b.*\b(?:all|every|everything)\b"
+     r"|\bif\s+i\s+(?:get|got|score)\b.*\b(?:all|every|everything)\b.*\b(?:cgpa|gpa)\b|\bbest[\s-]case\b", "best_case_cgpa"),
+    (r"\b(?:cgpa|gpa)\b.*\bif\s+i\s+(?:get|got|score)\b|\bif\s+i\s+(?:get|got|score)\b.*\b(?:cgpa|gpa)\b", "cgpa_predict"),
+    (r"\b(?:reach|get|achieve|hit)\s+(?:an?\s+)?\d+(?:\.\d+)?\s*cgpa\b|\bcgpa\s+of\s+\d", "overall_cgpa_target"),
+    (r"\b(?:need|needed|require|required|have\s+to|should\s+i)\b.*\b(?:fat|final|score|marks?|get)\b.*\b(?:[SABCDE]|pass)\b"
+     r"(?:\s+grade)?\s*(?:in|for)\b", "grade_target"),
+    (r"\bcgpa\b|\bcumulative\b|\boverall\s+gpa\b|\bpointer\b", "cgpa"),           # "pointer" = CGPA in VIT slang
+    (r"\b(?:bunk|bunking|skip|skipping)\b|\bcan\s+i\s+(?:miss|take\s+(?:a\s+)?leave)\b"
+     r"|\bmiss\s+(?:the\s+)?(?:next|today|tomorrow|tomorrow's|today's)\b"
+     r"|\bhow\s+many\s+(?:leaves?|classes|days)\s+can\s+i\b", "bunk_check"),
+    (r"\battendance\b|\bdebar|\bbelow\s+75\b|\b75\s*(?:%|percent)?\b|\babsent\b"
+     r"|\bclasses\b.*\b(?:attended|attend|missed|bunked)\b|\b(?:attended|missed)\b.*\bclasses\b", "attendance"),
+    (r"\b(?:exam|exams|fat|cat\s*-?\s*[12])\b.*\b(?:when|date|dates|schedule|timetable|next|days|start|starts|venue|seat)\b"
+     r"|\b(?:when|next|upcoming|any)\b.*\b(?:exam|exams|fat|cat\s*-?\s*[12])\b"
+     r"|\bwhich\s+(?:exam|exams)\b|\b(?:exam|exams)\b.*\b(?:first|earliest)\b", "exams"),
+    (r"\b(?:how\s+much|what)\s+did\s+i\s+(?:get|score)\b|\bmy\s+scores?\b", "vtop_marks"),
+    (r"\bgrades?\b|\bresults?\b|\bfail(?:ed)?\b", "grade_history"),
+    (r"\bmarks\b|\b(?:my|the)\s+mark\b|\bmark\s+(?:in|for|of)\b|\b(?:highest|lowest|best|worst|top)\s+marks?\b"
+     r"|\bscored\b|\binternals?\b"
+     r"|\bhow\s+did\s+i\s+do\b|\bcat\s*-?\s*[12]\b|\bfat\b|\bquiz\b", "vtop_marks"),
+    (r"\bassignments?\b|\bsubmissions?\b|\bmoodle\b|\blms\b|\bdue\b", "lms_assignments"),
+]
+_ACADEMIC_WORD_RE = re.compile(r"\b(?:exams?|cat\s*-?\s*[12]?|fat|marks?|grades?|grading|cgpa|gpa|attendance|"
+                               r"arrears?|semester|sem|credits?|vtop|debar\w*|assignments?)\b", re.I)
+_DAY_RE = re.compile(r"\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b", re.I)
+_CLOCK_RE = re.compile(r"\b\d{1,2}(?::\d{2})?\s*(?:am|pm)\b", re.I)
+
+
+def _timetable_fallback(text: str) -> tuple | None:
+    t = (text or "").lower()
+    day, clock = _DAY_RE.search(t), _CLOCK_RE.search(t)
+    try:
+        from core.course_resolver import resolve_course_best
+        names_course = bool(resolve_course_best(text))
+    except Exception:
+        names_course = False
+    # "do I have DAA on friday" says neither "class" nor "timetable".
+    if not re.search(r"\b(?:class|classes|lecture|lectures|lab|timetable|time\s+table|free)\b", t) \
+            and not (day and names_course):
+        return None
+    if re.search(r"\bnext\s+(?:class|lecture|lab)\b|\b(?:class|lecture|lab)\s+(?:is\s+)?(?:next|now|right\s+now)\b"
+                 r"|\bcurrent(?:ly)?\b", t):
+        return "next_class", {}
+    if re.search(r"\b(?:week|weekly|whole\s+week)\b", t):
+        return "timetable_week", {}
+    if day or clock:
+        return "class_at_time", {k: v for k, v in (("day", day and day.group(1)), ("time", clock and clock.group(0))) if v}
+    if "tomorrow" in t:
+        return "timetable_tomorrow", {}
+    if names_course:                           # "when is my DAA lab"
+        return "class_at_time", {}
+    return "timetable_today", {}
+
+
+def _academic_fallback(text: str) -> tuple | None:
+    t = (text or "").lower()
+    # Commands go on to the older keyword rules (tasks, money, schedule...).
+    if _COMMAND_RE.search(t.strip()):
+        return None
+    # Advice, knowledge and feelings go to the brain even when a keyword
+    # matches ("how should I prepare for FAT", "difference between CAT and
+    # FAT", "I'm scared I'll fail") — and straight there, so the older
+    # keyword rules after this don't grab them either.
+    is_prediction = re.search(r"\bif\s+i\s+(?:get|got|score)\b", t) and re.search(r"\bc?gpa\b|\bpointer\b", t)
+    if _KNOWLEDGE_RE.search(t) and not is_prediction:      # "...what happens to my cgpa" is still a prediction
+        return ("brain", None) if _ACADEMIC_WORD_RE.search(t) or re.search(r"\d", t) else None
+    letters, _ = detect_grade_filter(text)
+    if letters and not _ASSESSMENT_RE.search(text) and not re.search(r"\bc?gpa\b", t):
+        return "grade_history", {}
+    for pattern, intent in _ACADEMIC_FALLBACKS:
+        if re.search(pattern, text or "", re.I):
+            if intent in ("vtop_marks", "grade_history"):
+                return _marks_or_grades(text, intent), {}
+            return intent, {}
+    return _timetable_fallback(text)
+
+
+def _marks_or_grades(text: str, intent: str) -> str:
+    """Marks (CAT/FAT/DA scores) are this semester's; grades are finished
+    semesters'. "sem 3 marks" means the Sem 3 grades, "highest mark" means
+    this semester's scores — the classifier mixed these up both ways."""
+    from core.semesters import CURRENT_SEM
+    sem = detect_semester(text)
+    past_sem = sem not in (None, "all", CURRENT_SEM)
+    if intent == "vtop_marks" and past_sem and not _ASSESSMENT_RE.search(text):
+        return "grade_history"
+    if intent == "grade_history" and not past_sem and not detect_grade_filter(text)[0] \
+            and re.search(r"\b(?:marks?|scored?|internals?)\b", text, re.I) \
+            and not re.search(r"\bgrades?\b|\bresults?\b", text, re.I):
+        return "vtop_marks"
+    return intent
 
 
 def grade_matches(grade: str, letters: set) -> bool:
@@ -1382,6 +1521,7 @@ Examples:
 "mark has completed for all tasks" -> {{"intent": "task_complete", "entities": {{"all": true}}, "confidence": 0.9}}
 "I finished the fees thing" -> {{"intent": "task_complete", "entities": {{"query": "fees"}}, "confidence": 0.9}}
 "what did I get in DAA CAT1" -> {{"intent": "vtop_marks", "entities": {{"course": "DAA"}}, "confidence": 0.95}}
+"show internals" -> {{"intent": "vtop_marks", "entities": {{}}, "confidence": 0.9}}
 "mark my words this will work" -> {{"intent": "chat", "entities": {{}}, "confidence": 0.95}}
 "sync my LMS" -> {{"intent": "lms_sync", "entities": {{}}, "confidence": 0.95}}
 "how much did I spend at swiggy" -> {{"intent": "expense_search", "entities": {{"query": "swiggy"}}, "confidence": 0.95}}
@@ -1567,7 +1707,8 @@ def route(text: str) -> tuple:
     Returns (category, payload). `category` is looked up in server.py's
     INTENT_HANDLERS registry; "brain" means plain conversation.
     """
-    fast_result = _grade_reflex(text) or reflex_route(text) or _course_followup(text)
+    from config import VTOP_ENABLED
+    fast_result = (_grade_reflex(text) if VTOP_ENABLED else None) or reflex_route(text) or _course_followup(text)
     if fast_result:
         category, payload = fast_result
     else:
@@ -1575,8 +1716,14 @@ def route(text: str) -> tuple:
         if classified is None:
             # Every model is down: keyword rules beat answering everything
             # as chat, so they come back as the fallback.
-            category, payload = fast_path_route(text) or _offline_fallback(text)
+            category, payload = (_academic_fallback(text) if VTOP_ENABLED else None)                 or fast_path_route(text) or _offline_fallback(text)
         elif classified["intent"] == "chat" or classified["confidence"] < MIN_INTENT_CONFIDENCE:
+            return "brain", None
+        elif classified["intent"] in _VTOP_INTENTS and _KNOWLEDGE_RE.search(text) \
+                and not re.search(r"\bif\s+i\s+(?:get|got|score)\b", text, re.I):
+            # "what happens if attendance is below 75" came back as an
+            # attendance lookup; it wants an explanation. The brain still
+            # gets the student's numbers (core/academic_context.py).
             return "brain", None
         else:
             category, payload = classified["intent"], classified["entities"]
@@ -1592,6 +1739,16 @@ def route(text: str) -> tuple:
     # "did I get an A in calculus" was classified as assessment marks.
     if category == "vtop_marks" and detect_grade_filter(text)[0]:
         category = "grade_history"
+    if category in ("vtop_marks", "grade_history"):
+        category = _marks_or_grades(text, category)
+    # "what will my CGPA be if I get S in DAA" is a prediction, not a lookup.
+    if category == "cgpa" and re.search(r"\bif\s+i\s+(?:get|got|score)\b", text, re.I):
+        category = "cgpa_predict"
+    # A model under load answered "am I doing well this semester" with only
+    # the CGPA. Without the word, that question is for the brain, which
+    # gets attendance, marks and grades together.
+    if category in ("cgpa", "sem_gpa") and not re.search(r"\bc?gpa\b|\bpointer\b|\bcumulative\b|\bgrade\s+point", text, re.I):
+        return "brain", None
 
     # A college feature that isn't connected: say how to connect it, rather
     # than let the feature fail on a missing login.

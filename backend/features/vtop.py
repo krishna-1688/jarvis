@@ -482,6 +482,15 @@ def format_marks_response(intent: dict) -> str | None:
 
     conn          = get_db()
     qt            = intent["query_type"]
+    # "my CAT1 marks" means this semester's CAT1, not every semester's
+    # mixed together (the spoken summary of that mix named old courses).
+    # Only when this semester has none yet does it fall back to all.
+    if qt == "assessment_all" and not intent.get("want_all"):
+        has_current = conn.execute(
+            "SELECT 1 FROM vtop_marks WHERE semester_id = ? AND LOWER(mark_title) LIKE LOWER(?) LIMIT 1",
+            (CURRENT_SEM, f"%{intent['assessment']}%")).fetchone()
+        if has_current:
+            qt, intent = "assessment_in_sem", {**intent, "semester": CURRENT_SEM}
     cf_sql        = build_course_filter_sql(intent.get("course_filter", "theory"))
     cf = intent.get("course_filter", "theory")
     course_label = "Lab" if cf == "lab" else ("All" if cf == "all" else "Theory")
@@ -690,8 +699,9 @@ def _get_spoken_marks_summary(data_text: str, intent: dict) -> str:
     prompt = (
         f"Give a SHORT 1-3 sentence spoken summary of this marks data. "
         f"Mention key numbers only. Be conversational, not robotic. Be honest: call a score "
-        f"under half marks weak, never 'solid'. "
-        f"Don't read every line.\n\nData:\n{data_text[:1500]}"
+        f"under half marks weak, never 'solid'. Use only course names and numbers exactly as they "
+        f"appear in the data — never add a course or a number that isn't there. "
+        f"Don't read every line.\n\nData:\n{data_text[:2500]}"
     )
     try:
         summary = ask_oneshot(prompt, max_tokens=120)
@@ -716,12 +726,85 @@ def _get_spoken_marks_summary(data_text: str, intent: dict) -> str:
 #   depend on the audio/mic stack.
 # ══════════════════════════════════════════
 
+_LOWEST_RE = re.compile(r"\b(?:lowest|least|worst|weakest|minimum|poorest)\b", re.I)
+_HIGHEST_RE = re.compile(r"\b(?:highest|best|top|most|strongest|maximum)\b", re.I)
+_TOTAL_RE = re.compile(r"\b(?:total|so\s+far|sum|out\s+of\s+how\s+much)\b", re.I)
+
+
+def _short_assessment(title: str) -> str:
+    """"Continuous Assessment Test - II" -> "CAT 2", for speaking."""
+    t = re.sub(r"Continuous Assessment Test", "CAT", title or "", flags=re.I)
+    t = re.sub(r"Final Assessment Test", "FAT", t, flags=re.I)
+    t = re.sub(r"\s*-\s*(III|II|I)\b", lambda m: " " + str(len(m.group(1))), t)
+    return re.sub(r"\s*-\s*(\d)\b", r" \1", t).strip()
+
+
+def _computed_marks(user_input: str, intent: dict) -> FeatureResult | None:
+    """Questions with one exact answer — "which subject did I score lowest in
+    CAT1", "my highest mark", "total internal in global warming" — computed
+    here. Left to the AI summary, a mixed list once came back with course
+    names that weren't in it."""
+    want_low, want_high = bool(_LOWEST_RE.search(user_input)), bool(_HIGHEST_RE.search(user_input))
+    want_total = bool(_TOTAL_RE.search(user_input))
+    if not (want_low or want_high or want_total):
+        return None
+    from core.memory import get_db, sem_label
+
+    sem = intent.get("semester") if intent.get("semester") not in (None, "all") else CURRENT_SEM
+    sql = ("SELECT course_code, course_title, mark_title, scored_mark, max_mark, weightage_mark, weightage_percent "
+           "FROM vtop_marks WHERE semester_id = ? AND mark_title != 'NO_MARKS_YET' AND scored_mark IS NOT NULL")
+    args = [sem]
+    if intent.get("assessment"):
+        sql += " AND LOWER(mark_title) LIKE LOWER(?)"
+        args.append(f"%{intent['assessment']}%")
+    if intent.get("subject"):
+        sql += " AND (LOWER(course_title) LIKE LOWER(?) OR LOWER(course_code) LIKE LOWER(?))"
+        args += [f"%{intent['subject']}%"] * 2
+    conn = get_db()
+    rows = [dict(r) for r in conn.execute(sql, args).fetchall()]
+    conn.close()
+    if not rows:
+        return None
+    where = f" in {sem_label(sem)}" if sem != CURRENT_SEM else " this semester"
+    num = lambda x: f"{x:g}" if isinstance(x, float) else str(x)
+
+    if want_total:
+        totals = {}
+        for r in rows:
+            t = totals.setdefault(r["course_title"], [0.0, 0.0])
+            t[0] += r["weightage_mark"] or 0
+            t[1] += r["weightage_percent"] or 0
+        lines = [f"{c}: {round(got, 2):g} out of {round(out, 2):g}" for c, (got, out) in totals.items()]
+        if len(totals) == 1:
+            spoken = f"Your internal total in {lines[0].replace(':', ' so far is', 1)}."
+        else:
+            spoken = f"Internal totals{where}: " + "; ".join(lines[:5]) + ("…" if len(lines) > 5 else ".")
+        return FeatureResult(ok=True, data={"totals": totals}, display="Internal totals so far:\n  " + "\n  ".join(lines),
+                             spoken=spoken)
+
+    rows = [r for r in rows if r["max_mark"]]
+    pick = min if want_low and not want_high else max
+    best = pick(rows, key=lambda r: r["scored_mark"] / r["max_mark"])
+    label = "lowest" if pick is min else "highest"
+    which = f" {_short_assessment(intent['assessment'])}" if intent.get("assessment") else " score"
+    spoken = (f"Your {label}{which}{where} is {best['course_title']}"
+              + ("" if intent.get("assessment") else f" ({_short_assessment(best['mark_title'])})")
+              + f": {num(best['scored_mark'])} out of {num(best['max_mark'])}.")
+    ranked = sorted(rows, key=lambda r: r["scored_mark"] / r["max_mark"], reverse=(pick is max))
+    display = spoken + "\n\nAll, " + label + " first:\n" + "\n".join(
+        f"  {r['course_title']} — {r['mark_title']}: {num(r['scored_mark'])}/{num(r['max_mark'])}" for r in ranked)
+    return FeatureResult(ok=True, data={"rows": ranked}, display=display, spoken=spoken)
+
+
 def get_marks_result(user_input: str, intent: dict, on_progress=None) -> FeatureResult:
     """
     Offline marks lookup (SQLite-first). If nothing found, auto-syncs
     from VTOP once, retries the lookup, then falls back to a free-form
     Groq answer over whatever's in the DB.
     """
+    computed = _computed_marks(user_input, intent)
+    if computed:
+        return computed
     data = format_marks_response(intent)
     if data:
         spoken = _get_spoken_marks_summary(data, intent)

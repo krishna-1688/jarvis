@@ -1048,7 +1048,16 @@ def process(user_input: str) -> dict:
         # category == "brain", unregistered, OR a handler (whatsapp/web/pc)
         # decided this wasn't actually its domain — plain chat either way.
         category = "brain"
-        reply  = ask_groq(user_input)
+        # An academic question no single feature answers ("am I doing well
+        # this sem", "which subject should I focus on") still gets the
+        # student's real numbers, not "ask 'what's my attendance'".
+        context = ""
+        from config import VTOP_ENABLED
+        if VTOP_ENABLED:
+            from core.academic_context import is_academic, snapshot
+            if is_academic(user_input):
+                context = snapshot(user_input)
+        reply  = ask_groq(user_input, extra_context=context)
         result = FeatureResult(ok=True, data={}, display=reply, spoken=to_spoken(reply))
     else:
         # So a follow-up like "why is it so low?" is answered with this

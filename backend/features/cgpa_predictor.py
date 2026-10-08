@@ -29,6 +29,8 @@ ASSUMPTIONS — confirmed with the author, flagged here for visibility:
     a clear error rather than silently guessing.
 """
 
+import re
+
 from features.base import FeatureResult
 
 GRADE_POINTS = {"S": 10, "A": 9, "B": 8, "C": 7, "D": 6, "E": 5, "F": 0}
@@ -60,6 +62,18 @@ def _normalize_grade_input(raw) -> str | None:
     except (ValueError, TypeError):
         return None
     return min(GRADE_POINTS, key=lambda g: abs(GRADE_POINTS[g] - points))
+
+
+def _grade_from_text(user_input: str) -> str | None:
+    """The grade named in the sentence ("if I get S in DAA", "an A in OS",
+    "if I score 9 in everything"), for when no classifier extracted it —
+    the keyword fallback that runs while the models are rate limited."""
+    from core.router import detect_grade_filter
+    letters = detect_grade_filter(user_input or "")[0] - {"N", "P"}
+    if len(letters) == 1:
+        return next(iter(letters))
+    m = re.search(r"\b(?:get|got|score|scoring)\s+(?:an?\s+)?(10|[5-9])\b", user_input or "", re.I)
+    return _normalize_grade_input(m.group(1)) if m else None
 
 
 def _resolve_course_code(course_query: str) -> str | None:
@@ -297,7 +311,7 @@ def get_grade_target_result(user_input: str, entities: dict = None, on_progress=
     """"what CAT-2 do I need in TOC for an S" — entities: {course, target_grade}."""
     entities     = entities or {}
     course_query = entities.get("course")
-    target_grade = entities.get("target_grade")
+    target_grade = entities.get("target_grade") or _grade_from_text(user_input)
 
     if not course_query or not target_grade:
         msg = "Tell me the course and target grade — e.g. 'what CAT2 do I need in TOC for an S'."
@@ -339,7 +353,7 @@ def get_grade_target_result(user_input: str, entities: dict = None, on_progress=
 def get_best_case_cgpa_result(user_input: str, entities: dict = None, on_progress=None) -> FeatureResult:
     """"if I get A in everything" / "if I score 9 this sem" — entities: {grade} (default S)."""
     entities = entities or {}
-    grade    = _normalize_grade_input(entities.get("grade")) or "S"
+    grade    = _normalize_grade_input(entities.get("grade")) or _grade_from_text(user_input) or "S"
 
     from core.memory import get_current_sem_course_credits
     credits_map = get_current_sem_course_credits()
@@ -368,7 +382,7 @@ def get_cgpa_predict_result(user_input: str, entities: dict = None, on_progress=
     """
     entities     = entities or {}
     course_query = entities.get("course")
-    grade        = _normalize_grade_input(entities.get("grade"))
+    grade        = _normalize_grade_input(entities.get("grade")) or _grade_from_text(user_input)
 
     if not course_query or not grade:
         msg = "Tell me a course and a grade, or ask 'what's my CGPA if I get S in everything'."
@@ -400,6 +414,10 @@ def get_required_overall_gpa_result(user_input: str, entities: dict = None, on_p
     """"how much should I score to get a 9 CGPA overall" — entities: {target_cgpa}."""
     entities = entities or {}
     raw      = entities.get("target_cgpa")
+    if raw is None:
+        m = re.search(r"\b(\d{1,2}(?:\.\d+)?)\s*(?:\+\s*)?(?:cgpa|pointer)\b|\bcgpa\s+(?:of\s+)?(\d{1,2}(?:\.\d+)?)\b",
+                      user_input or "", re.I)
+        raw = (m.group(1) or m.group(2)) if m else None
     try:
         target_cgpa = float(raw)
     except (TypeError, ValueError):

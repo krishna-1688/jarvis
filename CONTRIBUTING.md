@@ -17,6 +17,8 @@ python backend/run.py        # server + voice loop
 cd frontend && npm run dev   # dashboard with hot reload (http://localhost:5173)
 ```
 
+After changing routing, run `python backend/tests/test_routing.py` (offline, a few seconds; add `--live` to go through the real classifier). When a real question is routed wrong, add it to `backend/tests/routing_cases.py` first.
+
 `python backend/server.py` alone runs the brain without the mic. You can talk to it by typing in the dashboard, or with `curl -X POST localhost:8000/command -H "Content-Type: application/json" -d "{\"text\": \"what's next\"}"`.
 
 ## Ground rules
