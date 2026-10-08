@@ -1,0 +1,4 @@
+* text=auto
+# cmd.exe misreads goto labels in LF-only batch files; GitHub ZIP downloads
+# honour this too.
+*.bat text eol=crlf
