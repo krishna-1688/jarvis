@@ -8,6 +8,13 @@ import {
 const pad = (n) => String(n).padStart(2, '0');
 const DAY = 86400000;
 
+/** Which college integrations are set up (until /profile answers, assume
+ * yes so a connected student's rail doesn't flicker). */
+function useConnected() {
+  const c = useSource('profile').data?.connected;
+  return { vtop: c ? !!c.vtop : true, lms: c ? !!c.lms : true };
+}
+
 function todaysBlocks(data) {
   return (data?.blocks || [])
     .map((b) => ({ ...b, s: toDate(b.start_at), e: toDate(b.end_at) }))
@@ -164,6 +171,7 @@ function Glance() {
   const tasks = useSource('tasks').data?.tasks || [];
   const focus = useSource('focus').data?.active;
   const money = useSource('money').data;
+  const connected = useConnected();
   const now = useNow(focus ? 1000 : 60000);
   const attended = rows.reduce((s, r) => s + (r.attended_classes || 0), 0);
   const total = rows.reduce((s, r) => s + (r.total_classes || 0), 0);
@@ -178,11 +186,13 @@ function Glance() {
 
   return (
     <>
-      <button type="button" className="row" onClick={() => openLens('attendance')}>
-        <div className="row__main"><div className="row__title row__title--quiet">Attendance</div></div>
-        <Sparkline values={[...rows].sort((a, b) => (a.percentage ?? 0) - (b.percentage ?? 0)).map((r) => r.percentage ?? 0)} />
-        <span className="row__value row__value--sm" style={{ minWidth: 58, textAlign: 'right' }}>{overall == null ? '—' : `${overall.toFixed(1)}%`}</span>
-      </button>
+      {connected.vtop && (
+        <button type="button" className="row" onClick={() => openLens('attendance')}>
+          <div className="row__main"><div className="row__title row__title--quiet">Attendance</div></div>
+          <Sparkline values={[...rows].sort((a, b) => (a.percentage ?? 0) - (b.percentage ?? 0)).map((r) => r.percentage ?? 0)} />
+          <span className="row__value row__value--sm" style={{ minWidth: 58, textAlign: 'right' }}>{overall == null ? '—' : `${overall.toFixed(1)}%`}</span>
+        </button>
+      )}
       <button type="button" className="row" onClick={() => openLens('tasks')}>
         <div className="row__main"><div className="row__title row__title--quiet">Tasks</div></div>
         <span className="row__value row__value--sm">{tasks.length ? `${tasks.length} open` : 'clear'}</span>
@@ -204,6 +214,10 @@ function Glance() {
       <button type="button" className="row" onClick={() => openLens('memory')}>
         <div className="row__main"><div className="row__title row__title--quiet">Memory</div></div>
         <svg className="ico" viewBox="0 0 24 24" style={{ color: '#B5AC9F' }}><circle cx="6" cy="6" r="2.5" /><circle cx="18" cy="8" r="2.5" /><circle cx="11" cy="18" r="2.5" /><path d="M8.2 7.2 15.6 7.8M7.2 8.3l2.7 7.4M16.8 10.2l-4.4 5.9" /></svg>
+      </button>
+      <button type="button" className="row" onClick={() => openLens('you')}>
+        <div className="row__main"><div className="row__title row__title--quiet">You · tone, goals, routine</div></div>
+        <svg className="ico" viewBox="0 0 24 24" style={{ color: '#B5AC9F' }}><circle cx="12" cy="8" r="4" /><path d="M4 21a8 8 0 0 1 16 0" /></svg>
       </button>
     </>
   );
@@ -243,6 +257,7 @@ function SlimRail({ activeLens }) {
   const tasks = useSource('tasks').data?.tasks || [];
   const pendingCount = (useSource('assignments').data?.pending || []).length;
   const { exam, overdue } = useAttention();
+  const connected = useConnected();
   const next = blocks.find((b) => b.e > now);
   const attended = rows.reduce((s, r) => s + (r.attended_classes || 0), 0);
   const total = rows.reduce((s, r) => s + (r.total_classes || 0), 0);
@@ -255,7 +270,7 @@ function SlimRail({ activeLens }) {
     ['attendance', total ? ((attended / total) * 100).toFixed(1) : '—', 'Att', null],
     ['assignments', String(overdue || pendingCount), 'LMS', overdue ? '#E8C27A' : null],
     ['tasks', String(tasks.length), 'Tasks', null],
-  ];
+  ].filter(([lens]) => (lens === 'exams' || lens === 'attendance' ? connected.vtop : lens === 'assignments' ? connected.lms : true));
   return (
     <nav className="slim" aria-label="At a glance">
       {stats.map(([lens, value, label, color]) => (
@@ -267,6 +282,10 @@ function SlimRail({ activeLens }) {
       <button type="button" className={`slim__stat ${activeLens === 'memory' ? 'is-active' : ''}`} onClick={() => openLens('memory')} aria-label="Memory">
         <svg className="ico" viewBox="0 0 24 24" style={{ color: '#B5AC9F', width: 18, height: 18 }}><circle cx="6" cy="6" r="2.5" /><circle cx="18" cy="8" r="2.5" /><circle cx="11" cy="18" r="2.5" /><path d="M8.2 7.2 15.6 7.8M7.2 8.3l2.7 7.4M16.8 10.2l-4.4 5.9" /></svg>
         <span className="x">Memory</span>
+      </button>
+      <button type="button" className={`slim__stat ${activeLens === 'you' ? 'is-active' : ''}`} onClick={() => openLens('you')} aria-label="You">
+        <svg className="ico" viewBox="0 0 24 24" style={{ color: '#B5AC9F', width: 18, height: 18 }}><circle cx="12" cy="8" r="4" /><path d="M4 21a8 8 0 0 1 16 0" /></svg>
+        <span className="x">You</span>
       </button>
     </nav>
   );

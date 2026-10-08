@@ -1,12 +1,12 @@
 """
 features/cgpa_predictor.py — CGPA prediction and grade-target reverse-solving.
 
-ASSUMPTIONS — confirmed with KK, flagged here for visibility:
+ASSUMPTIONS — confirmed with the author, flagged here for visibility:
   - Grade-point scale: S=10, A=9, B=8, C=7, D=6, E=5, F=0 (VIT's standard
     10-point scale).
   - Absolute grading cutoffs (used only for LAB courses — see below):
         S: 90-100, A: 80-89, B: 70-79, C: 60-69, D: 50-59, E: 45-49, F: <45
-  - Theory courses at VIT are relatively graded (curve-based) per KK —
+  - Theory courses at VIT are relatively graded (curve-based) per the author —
     required_mark() can't reverse-solve an exact score for these
     without the whole class's distribution, which no VTOP endpoint
     exposes. It returns error="relative_grading" instead of a
@@ -23,7 +23,7 @@ ASSUMPTIONS — confirmed with KK, flagged here for visibility:
     credits at all (only a cumulative CGPA + total credits), so these
     are sourced from the timetable instead — see
     get_current_sem_course_credits() in core/memory.py. The timetable
-    parser was extended (with KK's explicit sign-off) to also try to
+    parser was extended (with the author's sign-off) to also try to
     extract a credits column; if VTOP's real column name doesn't match
     what it tries, credits come back empty and these functions return
     a clear error rather than silently guessing.

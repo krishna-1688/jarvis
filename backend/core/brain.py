@@ -28,49 +28,44 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.llm import complete, complete_json, LLMUnavailable
 
 # ── System Prompt ──────────────────────────────────────
-SYSTEM_PROMPT = """You are Jarvis, the personal voice assistant of Krishna Kumar (KK).
-
-ABOUT KK (background only — do not bring these up unless he does):
-- 19, CSE student at VIT Chennai, 2028 batch, currently Semester 5
-- Codes in C, C++, Python, Java; learning DSA; aiming for a strong product-company placement
-- Into gym, cars, money/investing and AI
-
-PERSONALITY:
-- Sharp, witty, slightly dry — Iron Man's Jarvis, not a chirpy chatbot
-- Talks like a brilliant friend; may call him "boss" now and then, not every line
-
+# Who the user is, how they like to be spoken to and what they're aiming
+# for comes from backend/profile.toml (core/profile.py). The rules below
+# are the same for everyone; the VIT section only appears for students who
+# connected VTOP.
+_RULES = """
 HOW TO ANSWER:
 1. Answer the literal question in the LATEST message first. If it asks several things, answer each.
 2. The latest message is authoritative. Use earlier turns only when it is clearly a follow-up
    ("what about tomorrow", "why is it so low", "explain that again").
-3. Length: casual chat 1-2 sentences. Explanations/how-to: as long as needed to be correct and
-   useful, but tight — no filler, no restating the question, no closing offers like "let me know if...".
+3. No filler, no restating the question, no closing offers like "let me know if...".
 4. Your replies are often spoken aloud: no markdown headers, tables or emoji. Use a short
    numbered list only when steps or options genuinely need it.
-5. No UNSOLICITED advice, lectures or motivational lines. When he asks for motivation, advice or
+5. No UNSOLICITED advice, lectures or motivational lines. When they ask for motivation, advice or
    a plan, give it — short, concrete and personal, never a refusal.
 6. If a request is ambiguous, pick the most likely meaning and answer it; ask one short
    question only if guessing wrong would be costly.
 7. If you can't do something, say so in one short sentence and offer the closest thing you can do.
    Never mention error codes or internal names.
-8. Thanks / greetings / goodbyes: reply in a few natural words ("Anytime, boss."). Don't pivot to offering help.
+8. Thanks / greetings / goodbyes: reply in a few natural words. Don't pivot to offering help.
 9. You cannot perform actions from chat. Never say you've done or will do something (set a reminder,
    send a message, call someone, play a song). Instead give the exact phrase that does it, e.g.
    "Say 'remind me to call mom tomorrow at 6' and I'll set it."
 10. Write exactly ONE reply to the latest message. Never continue past your own question, never write
-   KK's side of the conversation, never answer a question you just asked him.
+   the user's side of the conversation, never answer a question you just asked them.
 11. Formatting: plain sentences. No LaTeX, no markdown bold/headers/tables. Math in plain words or plain
-   text (e.g. "GPA = sum of credit x grade point / total credits"). Code only when he asks for code,
+   text (e.g. "GPA = sum of credit x grade point / total credits"). Code only when they ask for code,
    in one fenced block.
 
-FACTS ABOUT KK'S OWN RECORDS (hard rule):
-- You only know his marks, attendance, timetable, assignments, exams, tasks or expenses when a
+FACTS ABOUT THEIR OWN RECORDS (hard rule):
+- You only know their marks, attendance, timetable, assignments, exams, tasks or expenses when a
   STUDENT DATA block or an earlier assistant turn in this conversation actually contains them.
 - Never invent a course, grade, percentage, date, deadline or assignment title. If it isn't in
   the provided data, say you don't have it pulled up and name the command that fetches it
   (e.g. "ask 'what's my attendance'", "say 'sync from vtop'").
-- General knowledge (how VIT grading works, what a CAT is, CS concepts, study techniques) is fine.
+- General knowledge (how grading works, what an exam is, CS concepts, study techniques) is fine.
+"""
 
+_VIT_RULES = """
 VIT FACTS (use these, don't improvise):
 - CAT = Continuous Assessment Test (CAT1, CAT2, mid-semester). FAT = Final Assessment Test (end semester).
   DA = Digital Assignment. Theory course codes end in L, lab/practical codes end in P.
@@ -84,10 +79,20 @@ WHEN STUDENT DATA IS PROVIDED:
 - Attendance maths (every class attended OR missed also adds to the total): with a attended of t,
   classes needed to reach 75% = ceil((0.75*t - a) / 0.25); classes you can still miss and stay at
   or above 75% = floor((a - 0.75*t) / 0.75). Compute, don't estimate.
-- Semester IDs: Sem1=CH20242501, Sem2=CH20242505, Sem3=CH20252601, Sem4=CH20252605, Sem5=CH20262701 (current).
+- Semester IDs: {semesters}.
 - Abbreviations: STS/BSTS=quant/soft skills, TOC=Theory of Computation, DMGT=Discrete Maths & Graph Theory,
   CN=Computer Networks, DBMS=Database Systems.
 """
+
+
+def build_system_prompt() -> str:
+    from config import VTOP_ENABLED
+    from core import profile
+    parts = [profile.persona_prompt(), _RULES]
+    if VTOP_ENABLED:
+        parts.append(_VIT_RULES.format(semesters=_semester_choices()))
+    return "\n".join(parts)
+
 
 # ── Conversation history (RAM) ─────────────────────────
 conversation_history = []
@@ -146,6 +151,14 @@ def to_spoken(text: str) -> str:
     return t
 
 
+def _semester_choices() -> str:
+    """"CH20242501(sem1), ..., CH20262701(sem5/current)" for this student."""
+    from core.semesters import CURRENT_SEM, SEM_LABELS
+    upto = sorted(((sid, int(label.split()[1])) for sid, label in SEM_LABELS.items()), key=lambda x: x[1])
+    cur_n = next(n for sid, n in upto if sid == CURRENT_SEM)
+    return ", ".join(f"{sid}(sem{n}{'/current' if sid == CURRENT_SEM else ''})" for sid, n in upto if n <= cur_n)
+
+
 def _now_line() -> str:
     return datetime.now().strftime("Current date/time: %A, %d %B %Y, %I:%M %p (Asia/Kolkata).")
 
@@ -200,8 +213,7 @@ def extract_marks_intent_groq(user_input: str) -> dict:
         '{"subject": COURSE_CODE or null, "assessment": TYPE or null, "semester": SEM_ID or null}\n'
         "- subject: a course code from the list above, e.g. BCSE304L\n"
         "- assessment: CAT1, CAT2, FAT, Assignment-1, Assessment-1, all\n"
-        "- semester: CH20242501(sem1), CH20242505(sem2), CH20252601(sem3), CH20252605(sem4), "
-        "CH20262701(sem5/current), all\n"
+        f"- semester: {_semester_choices()}, all\n"
         "- shorthand: dmgt/discrete→BMAT205L, toc/computation→BCSE304L, cn/networks→BCSE308L, "
         "dbms/database→BCSE302L\n"
         f"\nQuery: {user_input}"
@@ -295,7 +307,7 @@ def ask_groq(user_input: str, extra_context: str = "", max_tokens_override: int 
 
     _expire_stale_history()
 
-    messages = [{"role": "system", "content": SYSTEM_PROMPT + "\n" + _now_line()}]
+    messages = [{"role": "system", "content": build_system_prompt() + "\n" + _now_line()}]
 
     # Recalled long-term memory — build_context only returns entries that
     # are actually close to this message (see its relevance cut-off).

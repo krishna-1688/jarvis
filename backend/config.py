@@ -65,14 +65,12 @@ GROQ_MODEL = CHAT_MODELS[0]
 GROQ_CLASSIFIER_MODEL = CLASSIFIER_MODELS[0]
 WHISPER_MODEL = "whisper-large-v3"
 
-# ── User Settings ────────────────────────
-USER_NAME = "Krishna"
-USER_COLLEGE = "VIT Chennai"
-CITY = "Chennai"
+# ── You ──────────────────────────────────
+# Name, tone, goals, routine, voice... live in backend/profile.toml (see
+# core/profile.py), not here — nothing personal is hardcoded.
 
 # ── Jarvis Settings ──────────────────────
 WAKE_WORD = "hey jarvis"
-RESPONSE_STYLE = "sharp, witty, slightly sarcastic, like Iron Man's Jarvis"
 
 # Gates dev-only endpoints (e.g. /debug/refresh_timetable) that force a
 # live VTOP fetch on demand — off by default so they're not reachable
@@ -101,10 +99,15 @@ FOCUS_KILL_APPS = [
 # whole point; flip it off in .env if that's too much automatic logging.
 EXPENSE_AUTO_INGEST = os.getenv("EXPENSE_AUTO_INGEST", "true").lower() == "true"
 
-# ── VTOP ─────────────────────────────────
-VTOP_USERNAME = _require("VTOP_USERNAME")
-VTOP_PASSWORD = _require("VTOP_PASSWORD")
+# ── Optional integrations ────────────────
+# Each switches on only when its credentials are present, so Jarvis runs
+# for anyone with just a Groq key. VIT students add their VTOP / LMS
+# logins to get attendance, marks, exams, timetable and deadlines.
+VTOP_USERNAME = os.getenv("VTOP_USERNAME", "").strip()   # your VIT registration number
+VTOP_PASSWORD = os.getenv("VTOP_PASSWORD", "")
+LMS_USERNAME  = os.getenv("LMS_USERNAME", "").strip()
+LMS_PASSWORD  = os.getenv("LMS_PASSWORD", "")
+MY_WHATSAPP_NUMBER = os.getenv("MY_WHATSAPP_NUMBER", "").strip()  # with country code; for the brief/reminders
 
-LMS_USERNAME        = _require("LMS_USERNAME")
-LMS_PASSWORD        = _require("LMS_PASSWORD")
-MY_WHATSAPP_NUMBER  = _require("MY_WHATSAPP_NUMBER")  # your number with country code
+VTOP_ENABLED = bool(VTOP_USERNAME and VTOP_PASSWORD)
+LMS_ENABLED = bool(LMS_USERNAME and LMS_PASSWORD)

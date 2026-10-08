@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from 'react';
 import { motion } from 'motion/react';
 import { api } from '../api.js';
 import { useOrbit } from './context.js';
+import { useSource } from './store.js';
+import { profileView } from './format.js';
 
 const W = 1000;
 const H = 620;
@@ -15,7 +17,7 @@ const KINDS = {
 };
 const kindOf = (k) => KINDS[k] || { label: k, dot: 'fill', color: '#B5AC9F' };
 
-/** Force layout, run once per snapshot (~40 nodes, a few ms). KK sits
+/** Force layout, run once per snapshot (~40 nodes, a few ms). The user sits
  * at the centre; strong links pull tight, everything repels, and more
  * active memories sit closer in. Deterministic, so reopening the lens
  * shows the same map. */
@@ -68,6 +70,7 @@ export default function Memory() {
   const [sel, setSel] = useState(null);
   const [detail, setDetail] = useState(null);
   const [off, setOff] = useState(() => new Set());
+  const you = profileView(useSource('profile').data).name;
 
   useEffect(() => {
     api.memoryGraph().then(setGraph).catch(() => setError(true));
@@ -138,7 +141,7 @@ export default function Memory() {
           })}
           <circle cx={W / 2} cy={H / 2} r="40" fill="rgba(255,106,43,.08)" />
           <circle cx={W / 2} cy={H / 2} r="20" fill="url(#mem-kk)" />
-          <text x={W / 2} y={H / 2 + 40} textAnchor="middle" style={{ fontFamily: 'var(--font-signal)', fontSize: 11, letterSpacing: 3, fill: '#F3EDE4' }}>KK</text>
+          <text x={W / 2} y={H / 2 + 40} textAnchor="middle" style={{ fontFamily: 'var(--font-signal)', fontSize: 11, letterSpacing: 3, fill: '#F3EDE4' }}>{you === 'there' ? 'YOU' : you.toUpperCase().slice(0, 10)}</text>
           {pts.filter(visible).map((p, i) => {
             const kk = kindOf(p.kind);
             const isSel = p.id === sel;

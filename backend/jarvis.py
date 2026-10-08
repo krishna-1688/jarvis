@@ -207,7 +207,8 @@ def main():
     from core.mic import open_mic
     from core.wakeword import WakeDetector, THRESHOLD
     # Cache the fixed lines now, so even the first wake answers instantly.
-    voice.prewarm("Yes boss?", "Standing by, boss.", "Loud and clear, boss.",
+    from core import profile
+    voice.prewarm(profile.wake_reply(), "Standing by, boss.", "Loud and clear, boss.",
                   "I'm offline right now, boss — I can't understand speech without the internet.")
     mic = open_mic(should_stop=is_shutdown_requested)
     detector = WakeDetector()
@@ -222,7 +223,7 @@ def main():
                 continue
             print(f"\n✅ Wake word (score {score:.2f})")
             push_voice_event({"type": "wake"})
-            speak("Yes boss?")
+            speak(profile.wake_reply())
             mic.drain()
             conversation(mic)
             set_expecting_confirmation(False)

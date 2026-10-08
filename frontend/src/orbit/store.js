@@ -23,6 +23,7 @@ const SOURCES = {
   focus:       { fetch: api.focusStatus,                   every: 60_000,  refreshOn: ['focus'] },
   focusStats:  { fetch: () => api.focusStats(7),           every: 600_000, refreshOn: ['focus'] },
   money:       { fetch: () => api.expensesSummary('month'), every: 300_000, refreshOn: ['expenses'] },
+  profile:     { fetch: api.profile,                       every: 600_000, refreshOn: ['profile'] },
 };
 
 const RETRY_MS = 15_000;

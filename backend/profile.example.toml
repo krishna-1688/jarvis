@@ -1,0 +1,37 @@
+# Jarvis profile — this is what makes Jarvis YOURS.
+# `python setup.py` fills it in for you, or copy this file to
+# backend/profile.toml and edit it. You can also change it any time from
+# the dashboard ("You" in the rail). Changes apply instantly.
+
+[you]
+name = "Alex"                 # what Jarvis calls you in greetings
+call_me = "boss"              # how it addresses you out loud: "boss", "sir", your name, or "" for none
+about = "2nd-year CSE student at VIT Chennai who loves building things"
+
+[style]
+tone = "witty"                # witty | friendly | formal | tough-love | calm
+reply_length = "short"        # short | balanced | detailed
+language = "English"          # e.g. "English", "English with a little Tamil", "Hinglish"
+humour = true
+
+[goals]
+dream = "Build a product used by millions"
+ambitions = ["Crack a product-company placement", "Keep CGPA above 9"]
+motivation = "Proving to myself I can do hard things"   # what drives you — used when you ask for motivation
+
+[routine]
+wake_time = "07:00"
+sleep_time = "23:30"
+study_time = "20:00-22:00"
+habits = ["gym at 6pm", "revise before bed"]
+favourites = ["AI", "cricket", "lo-fi music"]
+
+[college]
+# VIT features switch on when VTOP_USERNAME / LMS_USERNAME are set in .env.
+campus = "chennai"            # chennai (tested) | vellore (experimental)
+admission_year = 0            # 0 = work it out from your registration number (e.g. 24BCE1234 -> 2024)
+current_sem = 0               # 0 = automatic (Fall = Jul-Dec, Winter = Jan-Jun); set a number to pin it
+
+[voice]
+wake_reply = "Yes {call_me}?" # what Jarvis says when it hears "Hey Jarvis"
+tts_voice = "en-GB-RyanNeural"  # any edge-tts voice, e.g. en-IN-PrabhatNeural, en-IN-NeerjaNeural, en-US-GuyNeural

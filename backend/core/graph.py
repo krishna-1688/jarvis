@@ -530,7 +530,7 @@ class MemoryGraph:
             if not chosen and re.search(r"\b(?:my|i|i'm|mine|myself)\b", text.lower()):
                 chosen = facts[:5]
             if chosen:
-                lines.append("Things KK told you to remember: " + " | ".join(r[0] for r in chosen))
+                lines.append("Things the user told you to remember: " + " | ".join(r[0] for r in chosen))
 
         top_nodes = [n for n, a in sorted(activation.items(), key=lambda x: -x[1]) if a > 0.05][:10]
         if top_nodes:
@@ -553,7 +553,7 @@ class MemoryGraph:
                 info[eid] = (ts, etext, reply)
             for eid in sorted(scores, key=lambda e: -scores[e])[:MAX_EVENTS_IN_CONTEXT]:
                 ts, etext, reply = info[eid]
-                lines.append(f"{_ago(now - ts)} KK asked \"{etext[:80]}\" -> you said: {reply[:95]}")
+                lines.append(f"{_ago(now - ts)} the user asked \"{etext[:80]}\" -> you said: {reply[:95]}")
 
             labels = conn.execute(
                 f"SELECT id, kind, label FROM nodes WHERE id IN ({ph}) AND kind IN ('course','exam','person','task')", top_nodes
@@ -581,7 +581,7 @@ class MemoryGraph:
         if total < 3:
             return ""
         best = max(rows, key=lambda r: r[1])
-        return f"Habit: KK usually starts focus sessions in the {best[0][6:]} ({best[1]} of {total})."
+        return f"Habit: the user usually starts focus sessions in the {best[0][6:]} ({best[1]} of {total})."
 
     # ── introspection / forgetting ────────────────────────────
     def find_nodes(self, query: str) -> list:

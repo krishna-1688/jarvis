@@ -6,6 +6,7 @@ import { useNow } from './useNow.js';
 import { AssignmentCards, AttendanceBars, ExamCards, Ring, TaskList, Timeline } from './viz.jsx';
 import { durShort, inr, shortCourse, toDate, upcomingExams } from './format.js';
 import Memory from './Memory.jsx';
+import You from './You.jsx';
 
 function QuickInput({ placeholder, prefix = '', hint }) {
   const { send } = useOrbit();
@@ -223,6 +224,7 @@ const LENSES = {
   focus:       { title: 'Focus',       kicker: 'Deep work', Body: FocusLens },
   money:       { title: 'Money',       kicker: 'This month', Body: MoneyLens },
   memory:      { title: 'What Jarvis connects', kicker: 'Memory', Body: Memory, wide: true },
+  you:         { title: 'Make Jarvis yours', kicker: 'You', Body: You },
 };
 
 /** Subtitle helpers for the lens header. */

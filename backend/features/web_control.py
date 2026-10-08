@@ -9,7 +9,7 @@ Tier 1 capabilities:
   5. compare_across_sites  — "compare this laptop on Amazon and Flipkart"
 
 Design choices:
-  - Chrome runs HEADED (visible window) by default — KK explicitly wants
+  - Chrome runs HEADED (visible window) by default — the user wants
     to watch Jarvis work, not just trust a silent background process.
   - A single persistent Playwright browser instance is reused across
     calls in the same Jarvis session rather than relaunching Chrome
@@ -23,6 +23,11 @@ Design choices:
 """
 
 import os
+
+
+def _vtop_host() -> str:
+    from core.semesters import campus
+    return campus()["host"]
 import sys
 import re
 import functools
@@ -49,7 +54,7 @@ _context      = None
 _current_page = None
 
 # Persisted login-session cookies/localStorage so a clean backend restart
-# doesn't force KK to re-log into Gmail/LinkedIn/GitHub/etc. every time —
+# doesn't force the user to re-log into Gmail/LinkedIn/GitHub/etc. every time —
 # same data/ directory pattern as features/spotify.py's .spotify_cache.
 _SESSION_STATE_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "browser_state.json"
@@ -121,7 +126,7 @@ def _ensure_browser():
 
         _playwright = sync_playwright().start()
         _browser = _playwright.chromium.launch(
-            headless=False,          # KK wants to SEE Jarvis working
+            headless=False,          # the user wants to SEE Jarvis working
             args=["--start-maximized"]
         )
         state_arg = _SESSION_STATE_PATH if os.path.exists(_SESSION_STATE_PATH) else None
@@ -165,7 +170,7 @@ def save_browser_session() -> None:
 
 @_on_browser_thread
 def close_browser():
-    """Public — call this if KK says 'close the browser' or on Jarvis shutdown."""
+    """Public — call this if the user says 'close the browser' or on Jarvis shutdown."""
     save_browser_session()
     with _pw_lock:
         _close_browser_unsafe()
@@ -203,7 +208,7 @@ KNOWN_SITES = {
     "linkedin":   {"url": "https://www.linkedin.com",   "search_selector": "input[placeholder*='Search']"},
     "twitter":    {"url": "https://twitter.com",        "search_selector": "input[data-testid='SearchBox_Search_Input']"},
     "x":          {"url": "https://twitter.com",        "search_selector": "input[data-testid='SearchBox_Search_Input']"},
-    "vtop":       {"url": "https://vtopcc.vit.ac.in/vtop/login", "search_selector": None},
+    "vtop":       {"url": f"https://{_vtop_host()}/vtop/login", "search_selector": None},
     "moodle":     {"url": "https://lms.vit.ac.in",      "search_selector": None},
 
     # Previously "known" only as PC-launch guards in core/router.py's
@@ -218,7 +223,7 @@ KNOWN_SITES = {
     "whatsapp web":  {"url": "https://web.whatsapp.com",  "search_selector": None},  # QR login-gated, same rationale as vtop/moodle
     "spotify web":   {"url": "https://open.spotify.com",  "search_selector": None},  # only reached via the explicit "web"-qualifier carve-out in detect_spotify_intent
 
-    # CS-student-relevant sites (KK is CSE at VIT Chennai).
+    # CS-student-relevant sites (the user is CSE at VIT Chennai).
     "leetcode":      {"url": "https://leetcode.com",           "search_selector": "input[placeholder*='Search' i]"},
     "hackerrank":    {"url": "https://www.hackerrank.com",     "search_selector": "input[name='search']"},
     "codeforces":    {"url": "https://codeforces.com",         "search_selector": "input[name='q']"},
@@ -416,7 +421,7 @@ def get_page_text(max_chars: int = 6000) -> FeatureResult:
 def compare_across_sites(query: str, site_a: str, site_b: str) -> FeatureResult:
     """
     "compare this laptop on amazon and flipkart"
-    Opens TWO separate tabs (so KK can see both side by side), searches
+    Opens TWO separate tabs (so the user can see both side by side), searches
     each, and grabs visible text from both results pages. Groq does the
     actual comparison afterward using this raw data.
     """

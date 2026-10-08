@@ -23,3 +23,6 @@ whatsapp_service/node_modules/
 
 # Local tool settings (Claude Code etc.)
 .claude/
+
+# Personal profile (template: backend/profile.example.toml)
+**/profile.toml

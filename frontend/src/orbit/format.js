@@ -123,3 +123,13 @@ export function upcomingExams(exams = [], now = Date.now()) {
 export function inr(n) {
   return `₹${Math.round(n || 0).toLocaleString('en-IN')}`;
 }
+
+/** The user's profile bits the UI needs, with safe defaults before it loads. */
+export function profileView(data) {
+  const you = data?.profile?.you || {};
+  const name = (you.name || '').trim() || 'there';
+  const callMe = (you.call_me ?? 'boss').trim();
+  const wake = (data?.profile?.voice?.wake_reply || 'Yes {call_me}?')
+    .replace('{call_me}', callMe).replace('{name}', name).replace(/\s+\?/, '?').trim() || 'Yes?';
+  return { name, callMe, wake };
+}

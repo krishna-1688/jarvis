@@ -3,7 +3,7 @@ features/daily_brief.py — assembles and sends the daily WhatsApp brief.
 
 Fires once daily at 6:30 AM via a background thread in jarvis.py (same
 thread+sleep pattern as daily_sync_worker/lms_reminder_worker — no new
-scheduling dependency, per KK's choice). Can also be triggered manually
+scheduling dependency, by design). Can also be triggered manually
 via the "daily_brief" voice intent ("give me my brief").
 
 Each section catches its own failures independently — if one data

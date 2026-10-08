@@ -8,7 +8,7 @@ features/spotify.py — Spotify playback control, two layers:
      restriction, the Web API 403s "Premium required" for free accounts.
 
   2. OS-level fallback (no setup, no Premium needed) — used automatically
-     whenever the API isn't configured. KK doesn't have Premium, so this
+     whenever the API isn't configured. The author didn't have Premium, so this
      is the layer actually in use:
        - pause/resume/next/previous/now-playing go through Windows'
          System Media Transport Controls (SMTC, via the `winsdk`
@@ -415,14 +415,14 @@ def _type_into_search_box(hwnd, query: str, attempts: int = 3) -> bool:
 
 
 def _restore_and_hide(hwnd, original_fg) -> None:
-    """Puts the window KK was actually looking at back in front, and
+    """Puts the window the user was actually looking at back in front, and
     tucks Spotify's window back out of view — used after the search-and-
     play automation below, which unavoidably needs Spotify focused for a
     couple of seconds to type into its search box (a real OS-level
     keystroke is the only thing that triggers Spotify's own live search;
     confirmed live that setting the search box's value directly via UI
     Automation, without real keystrokes, doesn't update results at all).
-    KK doesn't want to watch that happen — this makes it a brief flash
+    the user doesn't want to watch that happen — this makes it a brief flash
     rather than something that sits in front of him afterward."""
     import win32con
     import win32gui
@@ -441,11 +441,11 @@ def ui_play_song(query: str, on_progress=None) -> FeatureResult:
     """Search-and-play fallback with no API/Premium requirement — drives
     the real desktop app's own search box, then clicks the actual
     accessible Play button for the top result (see _find_play_button).
-    Restores whatever KK was looking at before and minimizes Spotify
+    Restores whatever the user was looking at before and minimizes Spotify
     again afterward (see _restore_and_hide) — he doesn't want to watch
     the automation happen, just get music playing in the background.
     on_progress, if given, is called with short status strings at each
-    step — KK asked for this specifically: the automation takes a few
+    step — asked for specifically: the automation takes a few
     seconds, and he wants to know what's happening during that window
     rather than just staring at a silent "thinking" indicator."""
     import win32gui

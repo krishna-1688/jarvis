@@ -95,7 +95,7 @@ _QUESTION_PREFIX_RE = re.compile(
     r"difference\s+between\b|what\s+does\s+\S+\s+mean\b|meaning\s+of\b|summari[sz]e\s+(?!this\b|the\s+page\b))"
 )
 
-# If one of these appears, the question is probably about KK's own
+# If one of these appears, the question is probably about the user's own
 # data or a device/app — let the real matchers or the classifier decide.
 _COMMAND_OR_DATA_TERMS = (
     "attendance", "marks", "mark", "cgpa", "gpa", "grade", "grades", "timetable", "time table",
@@ -416,7 +416,7 @@ def has_marks_keyword(text: str) -> bool:
         return True
     if _has_any(t, _CAT_FAT_ONLY_KEYWORDS) and not _has_any(t, _CAT_FAT_NON_MARKS_GUARDS):
         return True
-    # "score" only counts as a marks question when it's about KK
+    # "score" only counts as a marks question when it's about the user
     # ("what did I score in DBMS"), not "what's the cricket score".
     if _has_any(t, _SCORE_ONLY_KEYWORDS) and _PERSONAL_RE.search(t) and not _has_any(t, _SCORE_NON_MARKS_GUARDS):
         return True
@@ -437,7 +437,7 @@ def is_vtop_fetch_request(text: str) -> bool:
 
 
 # Bare "assignment" is also a programming term ("assignment operator"),
-# so on its own it only counts alongside a word that makes it about KK's
+# so on its own it only counts alongside a word that makes it about the user's
 # coursework.
 LMS_STRONG_KEYWORDS = [
     "pending assignment", "pending assignments", "lms", "moodle", "what's due", "whats due",
@@ -957,23 +957,29 @@ _CALL_RE = re.compile(r"^(?:call|phone|ring|dial)\s+(?!me\b|it\b|this\b|that\b|a
 #   argument parsing, not routing itself)
 # ══════════════════════════════════════════
 
-SEMESTER_MAP = [
-    (["sem 1", "semester 1", "first sem", "1st sem", "sem1",
-      "semester1", "first semester"], "CH20242501"),
-    (["sem 2", "semester 2", "second sem", "2nd sem", "sem2",
-      "semester2", "second semester"], "CH20242505"),
-    (["sem 3", "semester 3", "third sem", "3rd sem", "sem3",
-      "semester3", "third semester"], "CH20252601"),
-    (["sem 4", "semester 4", "fourth sem", "4th sem", "sem4",
-      "semester4", "fourth semester"], "CH20252605"),
-    (["sem 5", "semester 5", "fifth sem", "5th sem", "sem5",
-      "semester5", "fifth semester", "current sem", "this sem",
-      "current semester", "this semester"], "CH20262701"),
-]
+_ORDINALS = ["first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth"]
+_ORD_SHORT = ["1st", "2nd", "3rd", "4th", "5th", "6th", "7th", "8th"]
+
+
+def _semester_map() -> list:
+    """(phrases, semester id) for this student's semesters — IDs come from
+    core/semesters.py (admission year + today), not from one batch's list."""
+    from core.semesters import CURRENT_SEM, SEM_LABELS, current_number
+    by_number = {int(label.split()[1]): sid for sid, label in SEM_LABELS.items()}
+    out = []
+    for n, sid in sorted(by_number.items()):
+        out.append(([f"sem {n}", f"semester {n}", f"sem{n}", f"semester{n}", f"{_ORD_SHORT[n - 1]} sem",
+                     f"{_ORDINALS[n - 1]} sem", f"{_ORDINALS[n - 1]} semester"], sid))
+    out.append((["current sem", "this sem", "current semester", "this semester"], CURRENT_SEM))
+    prev = by_number.get(current_number() - 1)
+    if prev:
+        out.append((["last sem", "last semester", "previous sem", "previous semester"], prev))
+    return out
+
 
 def detect_semester(text: str) -> str | None:
     t = text.lower()
-    for keywords, sem_id in SEMESTER_MAP:
+    for keywords, sem_id in _semester_map():
         if _has_any(t, keywords):
             return sem_id
     if _has_any(t, ["all sem", "all semester", "all sems",
@@ -1253,7 +1259,7 @@ GROQ_INTENTS = {
     "system_shutdown":  "shut down/exit Jarvis itself",
     "spotify":          "Spotify playback: play/open/pause/resume/skip/volume/now playing",
     "pc":               "control THIS PC: volume, mute, screenshot, brightness, open/close DESKTOP APPS (chrome, vs code, notepad), battery/CPU/RAM/disk, clipboard, windows, shutdown/restart/sleep the PC",
-    "screen":           "look at KK's screen right now: what's on it, read/explain/summarise something visible on it",
+    "screen":           "look at the user's screen right now: what's on it, read/explain/summarise something visible on it",
     "web":              "browse: open/search a WEBSITE (youtube, google, amazon, gmail), compare sites, summarize/scroll/click the open page",
     "whatsapp":         "send a WhatsApp message to someone",
     "vtop_marks":       "my scores in assessments (CAT/FAT/quiz marks) — not \"mark X as done\", not \"mark my words\"",
@@ -1264,7 +1270,23 @@ GROQ_INTENTS = {
     "chat":             "anything else: conversation, jokes, opinions, advice, general or CS/academic knowledge questions",
 }
 
-EXTRACTION_PROMPT = """Classify a voice-assistant command for a VIT student (KK) into exactly ONE intent.
+# Intents that need a VIT login; hidden from the classifier when that
+# integration isn't set up, so a non-VIT user asking "what are my marks"
+# gets a plain answer instead of a feature that can't work.
+_VTOP_INTENTS = {"attendance", "bunk_check", "timetable_today", "timetable_tomorrow", "timetable_week",
+                 "next_class", "class_at_time", "exams", "cgpa", "sem_gpa", "grade_history", "cgpa_predict",
+                 "grade_target", "best_case_cgpa", "overall_cgpa_target", "vtop_marks", "vtop_fetch_marks",
+                 "alias_add"}
+_LMS_INTENTS = {"lms_assignments", "lms_sync"}
+
+
+def available_intents() -> dict:
+    from config import VTOP_ENABLED, LMS_ENABLED
+    hidden = (set() if VTOP_ENABLED else _VTOP_INTENTS) | (set() if LMS_ENABLED else _LMS_INTENTS)
+    return {k: v for k, v in GROQ_INTENTS.items() if k not in hidden}
+
+
+EXTRACTION_PROMPT = """Classify a command given to a personal voice assistant into exactly ONE intent.
 Pick a feature intent only when the user wants THEIR OWN data or an ACTION done. Questions about concepts,
 how things work, advice, jokes and small talk are "chat" — even if they mention CPUs, memory, exams, marks or apps.
 Judge the MEANING, not keywords: speech-to-text mishears words ("mark has completed" = "mark as completed",
@@ -1329,7 +1351,8 @@ def extract_general_intent_groq(text: str) -> dict | None:
     """
     from core.context import get_recent_turns
 
-    intent_list = "\n".join(f"- {k}: {v}" for k, v in GROQ_INTENTS.items())
+    intents = available_intents()
+    intent_list = "\n".join(f"- {k}: {v}" for k, v in intents.items())
     recent = get_recent_turns(3)
     recent_turns = (
         "\n".join(
@@ -1342,14 +1365,14 @@ def extract_general_intent_groq(text: str) -> dict | None:
 
     try:
         # 5 s budget: a normal classification takes 0.3-1.5 s; past that the
-        # offline rules answer instead of leaving KK waiting.
+        # offline rules answer instead of leaving the user waiting.
         data = complete_json([{"role": "user", "content": prompt}], max_tokens=120, deadline_s=5.0)
     except (LLMUnavailable, ValueError) as e:
         print(f"[router] Stage 2 intent extraction failed: {e}")
         return None
 
     intent = data.get("intent")
-    if intent not in GROQ_INTENTS:
+    if intent not in intents:
         intent = "chat"
     entities = data.get("entities")
     if not isinstance(entities, dict):
@@ -1511,6 +1534,14 @@ def route(text: str) -> tuple:
     # nothing PC-related is in the text, falls back to chat).
     if category == "system_shutdown" and "jarvis" not in text.lower():
         category, payload = "pc", {}
+
+    # A college feature that isn't connected: say how to connect it, rather
+    # than let the feature fail on a missing login.
+    from config import VTOP_ENABLED, LMS_ENABLED
+    if category in _VTOP_INTENTS and not VTOP_ENABLED:
+        return "feature_off", {"feature": "vtop"}
+    if category in _LMS_INTENTS and not LMS_ENABLED:
+        return "feature_off", {"feature": "lms"}
 
     # Course backstop: whichever path routed a course-specific question,
     # the course named in the sentence must reach the feature. Measured:

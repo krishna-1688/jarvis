@@ -22,6 +22,16 @@ export const api = {
   conversationRecent: (minutes = 30) => getJSON(`/conversation/recent?minutes=${minutes}`),
   memoryGraph: (limit = 42) => getJSON(`/memory/graph?limit=${limit}`),
   memoryNode: (id) => getJSON(`/memory/node/${id}`),
+  profile: () => getJSON('/profile'),
+  saveProfile: async (profile) => {
+    const res = await fetch(`${BASE_URL}/profile`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profile }),
+    });
+    if (!res.ok) throw new Error(`PUT /profile -> ${res.status}`);
+    return res.json();
+  },
   command: async (text) => {
     const res = await fetch(`${BASE_URL}/command`, {
       method: 'POST',

@@ -167,7 +167,7 @@ def handle_recall_facts(user_input: str, payload: dict) -> FeatureResult:
     if top:
         lines.append("You bring up most: " + ", ".join(top))
     if habits:
-        lines.append(habits.replace("Habit: KK usually", "You usually"))
+        lines.append(habits.replace("Habit: the user usually", "You usually"))
     spoken_bits = []
     if facts:
         spoken_bits.append(f"You've told me {len(facts)} thing{'s' if len(facts) != 1 else ''}: " + "; ".join(facts[:3]) + ".")
@@ -520,6 +520,21 @@ def handle_alias_merchant(user_input: str, payload: dict) -> FeatureResult:
 # ══════════════════════════════════════════
 #   PC HANDLER
 # ══════════════════════════════════════════
+
+_FEATURE_OFF = {
+    "vtop": ("VIT data like attendance, marks, exams and your timetable",
+             "add VTOP_USERNAME and VTOP_PASSWORD to backend/.env (or run python setup.py college) and restart me"),
+    "lms": ("your LMS assignments and deadlines",
+            "add LMS_USERNAME and LMS_PASSWORD to backend/.env (or run python setup.py college) and restart me"),
+}
+
+
+def handle_feature_off(user_input: str, payload: dict) -> FeatureResult:
+    what, how = _FEATURE_OFF.get((payload or {}).get("feature"), _FEATURE_OFF["vtop"])
+    display = f"I'm not connected to {what} yet. To set it up, {how}."
+    spoken = f"I'm not connected to {what} yet — you can set it up with python setup.py college."
+    return FeatureResult(ok=False, data={}, display=display, spoken=spoken, error="feature_off")
+
 
 def handle_screen(user_input: str, payload: dict) -> FeatureResult:
     if not (_device_state["lid_open"] and _device_state["display_on"]):
@@ -923,6 +938,7 @@ def handle_web(user_input: str, payload: dict) -> FeatureResult | None:
 INTENT_HANDLERS = {
     "pc":                 handle_pc,
     "screen":             handle_screen,
+    "feature_off":        handle_feature_off,
     "vtop_marks":         handle_marks,
     "vtop_fetch_marks":   handle_vtop_fetch,
     "whatsapp":           handle_whatsapp,
@@ -1328,18 +1344,26 @@ def memory_maintenance_worker():
 
 
 def _start_background_workers():
-    threading.Thread(target=memory_maintenance_worker, daemon=True).start()
-    threading.Thread(target=startup_checks_worker, daemon=True).start()
-    threading.Thread(target=daily_sync_worker, daemon=True).start()
-    threading.Thread(target=lms_reminder_worker, daemon=True).start()
-    threading.Thread(target=daily_brief_worker, daemon=True).start()
-    threading.Thread(target=schedule_materialize_worker, daemon=True).start()
-    threading.Thread(target=attendance_refresh_worker, daemon=True).start()
-    threading.Thread(target=timetable_refresh_worker, daemon=True).start()
-    threading.Thread(target=grades_refresh_worker, daemon=True).start()
-    print("🔄 Background workers started (startup rollover/staleness check, VTOP sync 6AM, "
-          "LMS reminders hourly, daily brief 6:30AM, schedule materialize every 6h, "
-          "attendance refresh 7AM/6PM, timetable refresh 5AM, grades refresh Sun 9AM)")
+    """Only the jobs whose integration is connected: without a VTOP login
+    there's nothing to sync (and a login attempt with empty credentials
+    would just fail every morning), without a WhatsApp number there's no
+    one to send the brief to."""
+    from config import VTOP_ENABLED, LMS_ENABLED, MY_WHATSAPP_NUMBER
+    workers = [(memory_maintenance_worker, "memory upkeep 3:30AM"),
+               (schedule_materialize_worker, "schedule materialize every 6h")]
+    if VTOP_ENABLED:
+        workers += [(startup_checks_worker, "semester rollover/staleness check"),
+                    (daily_sync_worker, "VTOP sync 6AM"),
+                    (attendance_refresh_worker, "attendance refresh 7AM/6PM"),
+                    (timetable_refresh_worker, "timetable refresh 5AM"),
+                    (grades_refresh_worker, "grades refresh Sun 9AM")]
+    if LMS_ENABLED:
+        workers.append((lms_reminder_worker, "LMS reminders hourly"))
+    if MY_WHATSAPP_NUMBER:
+        workers.append((daily_brief_worker, "daily brief 6:30AM"))
+    for target, _ in workers:
+        threading.Thread(target=target, daemon=True).start()
+    print("🔄 Background workers started: " + ", ".join(label for _, label in workers))
 
 
 # ══════════════════════════════════════════
@@ -1429,6 +1453,29 @@ def _log_turn(text: str, source: str, result: dict):
         })
 
 
+@app.get("/profile")
+def get_profile():
+    """The user's profile (profile.toml) plus the choices the dashboard's
+    "You" lens offers, and which integrations are connected."""
+    from config import VTOP_ENABLED, LMS_ENABLED, MY_WHATSAPP_NUMBER
+    from core import profile
+    return {
+        "profile": profile.get(),
+        "choices": {"tone": list(profile.TONES), "reply_length": list(profile.LENGTHS)},
+        "connected": {"vtop": VTOP_ENABLED, "lms": LMS_ENABLED, "whatsapp": bool(MY_WHATSAPP_NUMBER)},
+    }
+
+
+class ProfileUpdate(BaseModel):
+    profile: dict
+
+
+@app.put("/profile")
+def put_profile(update: ProfileUpdate):
+    from core import profile
+    return {"profile": profile.save(update.profile)}
+
+
 @app.get("/memory/graph")
 def memory_graph(limit: int = 42):
     from core.graph import get_graph
@@ -1493,7 +1540,7 @@ def dashboard_auto_open():
 # Turns that are ABOUT memory aren't recorded in it: "forget everything
 # about X" would otherwise recreate X the moment it was deleted.
 _NOT_REMEMBERED = {"forget_about", "forget_last", "memory_about", "recall_facts", "remember_fact",
-                   "system_shutdown", "screen"}
+                   "system_shutdown", "screen", "feature_off"}
 
 
 def _observe_in_memory(text: str, source: str, result: dict):
@@ -1512,6 +1559,11 @@ def _observe_in_memory(text: str, source: str, result: dict):
 def command(req: CommandRequest):
     try:
         result = process(req.text)
+        # Replies were written saying "boss"; use however this user wants
+        # to be addressed (profile.toml [you] call_me), on screen and aloud.
+        from core.profile import personalize
+        result["display"] = personalize(result.get("display") or "")
+        result["spoken"] = personalize(result.get("spoken") or "")
         _log_turn(req.text, req.source, result)
         _observe_in_memory(req.text, req.source, result)
         if req.source == "voice":

@@ -30,7 +30,7 @@ MAX_UTTERANCE_S = 15
 END_SILENCE_S = 0.8
 MIN_UTTERANCE_S = 0.35
 
-JARVIS_VOICE = "en-GB-RyanNeural"
+JARVIS_VOICE = "en-GB-RyanNeural"   # default; profile.toml [voice] tts_voice overrides
 JARVIS_RATE = "+15%"
 JARVIS_VOLUME = "+0%"
 
@@ -115,10 +115,21 @@ _HALLUCINATIONS = {
 _CONFIRMATION_WORDS = {"yes", "yeah", "yep", "yup", "no", "nope", "sure", "correct", "right",
                        "okay", "ok", "confirm", "cancel", "stop"}
 
-_WHISPER_VOCAB_PROMPT = (
-    "Jarvis, KK, VTOP, VIT Chennai, LMS, Moodle, CGPA, GPA, CAT1, CAT2, FAT, DBMS, TOC, "
-    "DAA, CN, OS, DMGT, DSA, pomodoro, Spotify, WhatsApp, attendance, timetable, bunk."
-)
+def _voice() -> str:
+    from core import profile
+    return (profile.get()["voice"].get("tts_voice") or JARVIS_VOICE).strip()
+
+
+def _whisper_vocab_prompt() -> str:
+    """Words speech-to-text should expect: the user's name, and the VIT
+    vocabulary only for students who connected VTOP."""
+    from config import VTOP_ENABLED
+    from core import profile
+    words = ["Jarvis", profile.name(), "pomodoro", "Spotify", "WhatsApp", "timetable", "CGPA"]
+    if VTOP_ENABLED:
+        words += ["VTOP", "VIT", "LMS", "Moodle", "GPA", "CAT1", "CAT2", "FAT", "DBMS", "TOC",
+                  "DAA", "CN", "OS", "DMGT", "DSA", "attendance", "bunk"]
+    return ", ".join(dict.fromkeys(w for w in words if w)) + "."
 
 
 class Offline(Exception):
@@ -155,7 +166,7 @@ def transcribe(audio: np.ndarray) -> str:
         w.setframerate(RATE)
         w.writeframes(audio.tobytes())
     try:
-        result = _transcribe(buf.getvalue(), prompt=_WHISPER_VOCAB_PROMPT)
+        result = _transcribe(buf.getvalue(), prompt=_whisper_vocab_prompt())
     except (groq.APIConnectionError, groq.APITimeoutError) as e:
         raise Offline(str(e)) from e
     text = (result.text or "").strip()
@@ -176,7 +187,7 @@ _SPEAKER_NAME = os.environ.get("JARVIS_SPEAKER_DEVICE")
 async def _edge_tts_mp3(text: str) -> bytes:
     import edge_tts
     buf = bytearray()
-    communicate = edge_tts.Communicate(text, voice=JARVIS_VOICE, rate=JARVIS_RATE, volume=JARVIS_VOLUME)
+    communicate = edge_tts.Communicate(text, voice=_voice(), rate=JARVIS_RATE, volume=JARVIS_VOLUME)
     async for chunk in communicate.stream():
         if chunk["type"] == "audio":
             buf.extend(chunk["data"])
@@ -239,23 +250,24 @@ _mem_cache: dict = {}
 
 def _cache_path(text: str) -> str:
     import hashlib
-    key = hashlib.sha1(f"{JARVIS_VOICE}|{JARVIS_RATE}|{JARVIS_VOLUME}|{text}".encode("utf-8")).hexdigest()[:20]
+    key = hashlib.sha1(f"{_voice()}|{JARVIS_RATE}|{JARVIS_VOLUME}|{text}".encode("utf-8")).hexdigest()[:20]
     return os.path.join(_TTS_CACHE_DIR, f"{key}.mp3")
 
 
 def _cached_mp3(text: str):
-    if text in _mem_cache:
-        return _mem_cache[text]
+    key = f"{_voice()}|{text}"   # a voice change in profile.toml must not replay the old voice
+    if key in _mem_cache:
+        return _mem_cache[key]
     try:
         with open(_cache_path(text), "rb") as f:
-            _mem_cache[text] = f.read()
-            return _mem_cache[text]
+            _mem_cache[key] = f.read()
+            return _mem_cache[key]
     except OSError:
         return None
 
 
 def _store_mp3(text: str, mp3: bytes):
-    _mem_cache[text] = mp3
+    _mem_cache[f"{_voice()}|{text}"] = mp3
     try:
         os.makedirs(_TTS_CACHE_DIR, exist_ok=True)
         with open(_cache_path(text), "wb") as f:
@@ -267,8 +279,10 @@ def _store_mp3(text: str, mp3: bytes):
 def prewarm(*texts: str):
     """Synthesize fixed phrases into the cache in the background, so even
     the first wake after startup answers instantly."""
+    from core.profile import personalize
+
     def run():
-        for t in texts:
+        for t in (personalize(x) for x in texts):
             if _cached_mp3(t) is None:
                 try:
                     mp3 = asyncio.run(_edge_tts_mp3(t))
@@ -282,6 +296,8 @@ def prewarm(*texts: str):
 def speak(text: str):
     if not text:
         return
+    from core.profile import personalize
+    text = personalize(text)   # "boss" -> however this user wants to be addressed
     try:
         print(f"\n🤖 Jarvis: {text}")
     except Exception:

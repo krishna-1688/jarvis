@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import { stopSpeaking } from '../lib/tts.js';
+import { useSource } from './store.js';
+import { profileView } from './format.js';
 
 const PLACEHOLDERS = [
   'Ask anything, or tell me what to do',
@@ -87,8 +89,9 @@ export default function CommandBar({ onSend, history = [], voiceDraft, busy, sug
     }
   };
 
+  const wakeLabel = profileView(useSource('profile').data).wake;
   const listening = voiceState === 'listening' || voiceState === 'transcribing' || voiceState === 'wake' || !!voiceDraft;
-  const label = voiceState === 'transcribing' ? 'Transcribing' : voiceState === 'wake' ? 'Yes, boss?' : 'Listening';
+  const label = voiceState === 'transcribing' ? 'Transcribing' : voiceState === 'wake' ? wakeLabel : 'Listening';
   const shown = voiceDraft || value;
 
   return (

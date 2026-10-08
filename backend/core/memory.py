@@ -25,18 +25,8 @@ os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
 
 # ── Semester ID → Label ────────────────────────────────
-SEM_LABELS = {
-    "CH20242501": "Semester 1 (Fall 2024-25)",
-    "CH20242505": "Semester 2 (Winter 2024-25)",
-    "CH20252601": "Semester 3 (Fall 2025-26)",
-    "CH20252605": "Semester 4 (Winter 2025-26)",
-    "CH20262701": "Semester 5 (Fall 2026-27)",
-    "CH20262705": "Semester 6 (Winter 2026-27)",
-    "CH20272801": "Semester 7 (Fall 2027-28)",
-    "CH20272805": "Semester 8 (Winter 2027-28)",
-}
-
-CURRENT_SEM = "CH20262701"
+# Per student, from admission year + today's date — see core/semesters.py.
+from core.semesters import SEM_LABELS, CURRENT_SEM  # noqa: E402
 
 def sem_label(sem_id: str) -> str:
     return SEM_LABELS.get(sem_id, sem_id)
@@ -792,7 +782,7 @@ def get_all_marks_summary(semester_id: str = None) -> str:
             f"    {r['mark_title']}: {scored}/{max_m}{wt_str} ({r['status']})"
         )
 
-    lines = [f"=== KK's Marks — {label} ==="]
+    lines = [f"=== Marks — {label} ==="]
     for code, info in subjects.items():
         lines.append(f"\n{info['title']} ({code}) [{info['type']}]:")
         lines.extend(info["marks"])
@@ -943,7 +933,7 @@ def get_subject_search_hint() -> str:
     subjects = get_available_subjects()
     if not subjects:
         return ""
-    lines = ["KK's subjects across all semesters:"]
+    lines = ["Subjects across all semesters:"]
     current_sem = None
     for code, title, sem_id in subjects:
         if sem_id != current_sem:
@@ -1534,7 +1524,7 @@ def recall_conversations(query: str, n: int = 1) -> list:
     for r in rows:
         overlap = words & _content_words(r["user_msg"])
         if len(overlap) >= 2 and len(overlap) >= len(words) / 2 and len(r["user_msg"].split()) > 3:
-            out.append(f"KK: {r['user_msg']} | Jarvis: {r['jarvis_msg']}")
+            out.append(f"User: {r['user_msg']} | Jarvis: {r['jarvis_msg']}")
             if len(out) >= n:
                 break
     return out
@@ -1545,7 +1535,7 @@ def build_context(user_input: str) -> str:
     facts = recall_facts(user_input)
     convs = recall_conversations(user_input, n=1)
     if facts:
-        parts.append("Things KK asked you to remember: " + " | ".join(facts))
+        parts.append("Things the user asked you to remember: " + " | ".join(facts))
     if convs:
         parts.append("A related past exchange: " + convs[0][:200])
     return "\n".join(parts)

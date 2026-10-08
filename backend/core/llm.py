@@ -142,7 +142,7 @@ def complete(messages: list, *, role: str = "chat", max_tokens: int = 300,
     deadline_s caps the whole call, fallbacks and waits included. Intent
     routing uses it: measured, a chain of rate-limited Groq models plus an
     overloaded Gemini once took 16.7 s to give up — the caller has a good
-    offline answer ready and should use it instead of making KK wait."""
+    offline answer ready and should use it instead of making the user wait."""
     deadline = time.monotonic() + deadline_s if deadline_s else None
     try:
         return _complete_once(messages, role, max_tokens, temperature, json_mode, deadline)

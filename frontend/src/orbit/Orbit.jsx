@@ -16,14 +16,13 @@ import { useNow } from './useNow.js';
 import { useWebSocketStatus } from '../hooks/useWebSocket.js';
 import { useVoiceProcessAlive } from '../hooks/useVoiceProcessAlive.js';
 import {
-  bunkInfo, cleanCourse, dayWord, dueInfo, greeting, hm, shortCourse, toDate, upcomingExams,
+  bunkInfo, cleanCourse, dayWord, dueInfo, greeting, hm, profileView, shortCourse, toDate, upcomingExams,
 } from './format.js';
 import grainUrl from '../assets/grain.png';
 import './orbit.css';
 
 const STATE_LABEL = {
   idle: 'Standing by',
-  wake: 'Yes, boss?',
   listening: 'Listening',
   transcribing: 'Transcribing',
   thinking: 'Thinking',
@@ -74,7 +73,7 @@ function useSuggestions() {
   }, [now, attData, examData, lmsData, schedData]);
 }
 
-/** One line that tells KK the shape of the day before he asks. */
+/** One line that tells the user the shape of the day before they ask. */
 function BriefLine() {
   const now = useNow(60000);
   const blocks = useSource('schedule').data?.blocks || [];
@@ -118,6 +117,7 @@ const MOTES = [[16, 28, 0], [80, 20, -3], [86, 70, -5], [22, 76, -7], [50, 6, -2
 function Presence({ voiceState }) {
   const clock = useNow(1000);
   const active = voiceState !== 'idle';
+  const you = profileView(useSource('profile').data);
   return (
     <motion.div className="presence" data-active={active} data-voice={voiceState}
       initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0, scale: 0.94, transition: { duration: 0.25 } }}>
@@ -128,13 +128,13 @@ function Presence({ voiceState }) {
       </div>
       <div className="state-line rise" data-voice={voiceState} style={{ '--d': '0.45s' }}>
         <span className="state-line__dot" />
-        <span className="x">{STATE_LABEL[voiceState] || STATE_LABEL.idle}</span>
+        <span className="x">{voiceState === 'wake' ? you.wake : STATE_LABEL[voiceState] || STATE_LABEL.idle}</span>
         <span className="state-line__hint mono">
           {voiceState === 'idle' ? `${hm(clock)}:${String(clock.getSeconds()).padStart(2, '0')}` : ''}
         </span>
       </div>
       <div className="greeting rise" style={{ '--d': '0.55s' }}>
-        <h1>{greeting()}, <em>KK</em>.</h1>
+        <h1>{greeting()}, <em>{you.name}</em>.</h1>
       </div>
       <div className="rise" style={{ '--d': '0.65s' }}><BriefLine /></div>
     </motion.div>
@@ -203,7 +203,7 @@ export default function Orbit() {
   useEffect(() => {
     const onKey = (e) => {
       if (e.key === 'Escape' && lens) setLens(null);
-      if (e.altKey && /^[1-8]$/.test(e.key)) {
+      if (e.altKey && /^[1-9]$/.test(e.key)) {
         e.preventDefault();
         openLens(LENS_ORDER[Number(e.key) - 1]);
       }

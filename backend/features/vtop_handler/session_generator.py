@@ -13,7 +13,7 @@ from .Exceptions.invalid_credentials import InvalidCredentialsException
 from .Exceptions.invalid_crsf_token import InvalidCRSFToken 
 
 from .utils import find_image
-from .constants import VTOP_LOGIN_URL, VTOP_BASE_URL, HEADERS, VTOP_PRE_LOGIN, VTOP_LOGIN_PAGE_REDIRECT
+from .constants import VTOP_LOGIN_URL, VTOP_BASE_URL, HEADERS, VTOP_PRE_LOGIN, VTOP_LOGIN_PAGE_REDIRECT, _HOST
 from .captcha_solver import solve_captcha
 
 def get_csrf_from_input(html: str) -> str | None:
@@ -47,7 +47,7 @@ async def get_captcha(sess: aiohttp.ClientSession) -> tuple[str, str | None]:
         token = get_csrf_from_input(login_html) or token
 
     # Fetch captcha from dedicated endpoint
-    async with sess.get("https://vtopcc.vit.ac.in/vtop/get/new/captcha", headers=HEADERS) as resp:
+    async with sess.get(f"https://{_HOST}/vtop/get/new/captcha", headers=HEADERS) as resp:
         captcha_html = await resp.text()
         captcha = find_image(captcha_html)
 
