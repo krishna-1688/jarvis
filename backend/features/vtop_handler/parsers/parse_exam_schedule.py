@@ -7,6 +7,10 @@ from typing import Dict
 
 
 def get_exam_row_data(row):
+    # Venue is blank (NaN) until VIT allots rooms, and isn't always
+    # "BLOCK-ROOM" — one such row used to abort the whole schedule.
+    venue = row[10] if isinstance(row[10], str) else ""
+    block, _, room = venue.partition("-")
     data = {
         "Course Code": row[1],
         "Course Title": row[2],
@@ -15,15 +19,15 @@ def get_exam_row_data(row):
         "Exam Date": row[6],
         "Reporting Time": row[8],
         "Exam Time": row[9],
-        "Venue Block":  null_if_dash(row[10].split("-")[0]),
-        "Venue Room":   null_if_dash(row[10].split("-")[1]),
+        "Venue Block":  null_if_dash(block) if block else None,
+        "Venue Room":   null_if_dash(room) if room else None,
         "Seat Location": null_if_dash(row[11]),
         "Seat No":      null_if_dash(row[12]),
     }
     #  connvert  NaN to None
     data = {k: None if pd.isna(v) else v for k, v in data.items()}
-     # Check if "Course Code" starts with "STS" and set "Seat Location" as "Seat No" 
-    if data["Course Code"].startswith("STS"):
+     # Check if "Course Code" starts with "STS" and set "Seat Location" as "Seat No"
+    if str(data["Course Code"] or "").startswith("STS"):
         data["Seat Location"] = data["Seat No"]
     return data
 

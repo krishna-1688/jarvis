@@ -103,22 +103,31 @@ async def _listen_and_probe():
 def check_env():
     from dotenv import dotenv_values
     env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    # Only the Groq key is required — VTOP / LMS / WhatsApp are optional.
+    required = ["GROQ_API_KEY"]
     if not os.path.exists(env_path):
-        return {"env_file_found": False, "missing": ["GROQ_API_KEY", "VTOP_USERNAME", "VTOP_PASSWORD"]}
+        return {"env_file_found": False, "missing": required}
 
     values = dotenv_values(env_path)
-    required = ["GROQ_API_KEY", "VTOP_USERNAME", "VTOP_PASSWORD"]
     missing = [k for k in required if not values.get(k)]
     return {"env_file_found": True, "missing": missing}
 
 
 def check_mic():
+    """Opens the same 16 kHz mono PyAudio stream jarvis.py uses and reads
+    half a second from it."""
     try:
-        import speech_recognition as sr
-        r = sr.Recognizer()
-        mic = sr.Microphone(sample_rate=16000)
-        with mic as source:
-            r.adjust_for_ambient_noise(source, duration=0.5)
+        import pyaudio
+        pa = pyaudio.PyAudio()
+        try:
+            stream = pa.open(format=pyaudio.paInt16, channels=1, rate=16000,
+                             input=True, frames_per_buffer=1600)
+            for _ in range(5):
+                stream.read(1600, exception_on_overflow=False)
+            stream.stop_stream()
+            stream.close()
+        finally:
+            pa.terminate()
         return {"ok": True}
     except Exception as e:
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}

@@ -161,9 +161,14 @@ _vtop_loop_ready  = threading.Event()
 
 def _vtop_loop_worker():
     global _vtop_loop
+    # aiohttp wants a selector loop on Windows. Build one directly rather
+    # than via set_event_loop_policy(): the policy is process-wide, and
+    # once set, Playwright's own loop (web control, LMS) became a selector
+    # loop too — which can't spawn the browser (NotImplementedError).
     if sys.platform == "win32":
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    _vtop_loop = asyncio.new_event_loop()
+        _vtop_loop = asyncio.SelectorEventLoop()
+    else:
+        _vtop_loop = asyncio.new_event_loop()
     asyncio.set_event_loop(_vtop_loop)
     _vtop_loop_ready.set()
     _vtop_loop.run_forever()
@@ -1104,20 +1109,25 @@ def get_bunk_check_result(user_input: str, entities: dict = None, on_progress=No
     am I safest to bunk in". entities may contain {"course": ...,
     "days_ahead": ...}.
     """
-    from core.memory import get_attendance_fresh_enough
+    from core.memory import get_attendance_fresh_enough, get_all_attendance
     from core.router import normalize_course_query
 
     entities   = entities or {}
     course     = normalize_course_query(entities.get("course") or _course_in_sentence(user_input))
     days_ahead = entities.get("days_ahead")
 
-    if not get_attendance_fresh_enough(6):
+    # Same rule as get_attendance_result: block on VTOP only when nothing
+    # is cached. Stale-but-present data answers instantly and refreshes
+    # quietly, so a slow or down VTOP never turns a bunk check into an error.
+    if not get_all_attendance():
         if on_progress:
             on_progress("Let me check your attendance on VTOP, one sec.")
         result = fetch_attendance()
         if result.get("error") == "Session expired, couldn't re-login":
             spoken = "VTOP kicked me out and won't let me back in."
             return FeatureResult(ok=False, data={}, display=spoken, spoken=spoken, error=result["error"])
+    elif not get_attendance_fresh_enough(6):
+        _background_refresh("attendance", fetch_attendance)
 
     # No named course but a day is implied — resolve via the timetable
     # instead of the generic "assume it meets" fallback.
@@ -1625,13 +1635,17 @@ def get_grades_result(mode: str, user_input: str, entities: dict = None, on_prog
     entities = entities or {}
     course   = normalize_course_query(entities.get("course"))
 
-    if not get_grades_fresh_enough(24):
+    # Grades change a few times a semester: answer from cache when there
+    # is one, and only block on VTOP the very first time.
+    if not get_latest_cgpa_summary() and not get_all_grades():
         if on_progress:
             on_progress("Let me pull your grades from VTOP, one sec.")
         result = fetch_grades()
         if result.get("error") == "Session expired, couldn't re-login":
             spoken = "VTOP kicked me out and won't let me back in."
             return FeatureResult(ok=False, data={}, display=spoken, spoken=spoken, error=result["error"])
+    elif not get_grades_fresh_enough(24):
+        _background_refresh("grades", fetch_grades)
 
     if mode == "cgpa":
         summary = get_latest_cgpa_summary()

@@ -253,7 +253,24 @@ def get_task_list_result(user_input: str, entities: dict = None, on_progress=Non
     return list_open(within_days=within_days, on_progress=on_progress)
 
 
+def tomorrow(on_progress=None) -> FeatureResult:
+    day = (datetime.now() + timedelta(days=1)).date()
+    due = [t for t in list_tasks(status="open")
+           if t["due_at"] and datetime.fromisoformat(t["due_at"]).date() == day]
+    if not due:
+        msg = "Nothing due tomorrow."
+        return FeatureResult(ok=True, data={"tasks": []}, display=msg, spoken=msg)
+    names = ", ".join(t["title"] for t in due[:3])
+    spoken = f"{len(due)} task{'s' if len(due) != 1 else ''} due tomorrow: {names}."
+    return FeatureResult(ok=True, data={"tasks": due}, display=_render_list(due), spoken=spoken)
+
+
 def get_task_today_result(user_input: str, entities: dict = None, on_progress=None) -> FeatureResult:
+    # The classifier has no separate "due tomorrow" intent, so "what's due
+    # tomorrow" lands here — answer the day that was actually asked about.
+    text = (user_input or "").lower()
+    if "tomorrow" in text and not _DAY_AFTER_TOMORROW_RE.search(text):
+        return tomorrow(on_progress=on_progress)
     return today(on_progress=on_progress)
 
 
