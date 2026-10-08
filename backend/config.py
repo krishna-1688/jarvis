@@ -20,8 +20,6 @@ GROQ_API_KEY = _require("GROQ_API_KEY")
 
 # Optional — Gemini is the fallback provider when Groq's quota runs out.
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
-OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY")
 SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
 SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
 # Must exactly match a Redirect URI registered on the app at
@@ -29,7 +27,6 @@ SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
 # local server on this exact host:port to catch the one-time login
 # callback, so it has to be a loopback address, not a public one.
 SPOTIFY_REDIRECT_URI = os.getenv("SPOTIFY_REDIRECT_URI", "http://127.0.0.1:8888/callback")
-PORCUPINE_API_KEY = os.getenv("PORCUPINE_API_KEY")
 
 # ── AI Models ────────────────────────────
 # Ordered fallback chains, each overridable from .env as a comma list.

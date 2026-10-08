@@ -1,5 +1,7 @@
 {
   "name": "jarvis-whatsapp-service",
+  "private": true,
+  "license": "MIT",
   "version": "1.0.0",
   "description": "WhatsApp Web background service for Jarvis",
   "main": "server.js",
