@@ -67,8 +67,9 @@ Changes apply from the next reply, with no restart.
    - your name, tone, voice, goals and routine
    - a quick “Hey Jarvis” microphone test
 3. **Run:** double-click **`start.bat`**. When the console shows *“Standby — say 'Hey Jarvis'”*, say it.
+4. **Open the dashboard:** for the best experience, start with *“Hey Jarvis, open dashboard”*. You'll see your college data, tasks, schedule and the conversation live, and you can type there instead of speaking.
 
-Press **Ctrl+J** any time for the dashboard. You can also type there instead of speaking.
+> **Tip:** you can also press **Ctrl+J** any time to open the dashboard.
 
 Need to change something later? Run `python setup.py college`, `profile`, `keys` or `mic` to redo just that part.
 
